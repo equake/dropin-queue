@@ -15,65 +15,76 @@ package sqs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/equake/dropin-queue/shim/internal/awserr"
 	"github.com/equake/dropin-queue/shim/internal/observability"
 	"github.com/equake/dropin-queue/shim/internal/protocol"
 	"github.com/equake/dropin-queue/shim/internal/storage"
 	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
-// AWSErrorCode são os códigos oficiais AWS SQS para erros que devolvemos.
+// AWSError é alias para awserr.Error (preserva call sites do pacote sqs).
+//
+// Pré-refactor (refactor/kiss-dry-pass-1) existia um AWSError local;
+// agora compartilhado entre SQS e SNS, com classificação sender-fault
+// registrada explicitamente via RegisterSenderFaults em init().
+type AWSError = awserr.Error
+
+// Código AWSError compartilhados. As constantes abaixo continuam no
+// pacote sqs por motivos de organização e para evitar import cycle;
+// awserr exporta as constantes equivalentes (Code sem prefixo).
 const (
-	// ErrCodeQueueAlreadyExists: tentativa de criar fila existente com
-	// atributos diferentes.
-	ErrCodeQueueAlreadyExists = "QueueAlreadyExists"
-
-	// ErrCodeQueueDoesNotExist: operação em fila inexistente.
-	ErrCodeQueueDoesNotExist = "QueueDoesNotExist"
-
-	// ErrCodeInvalidParameterValue: parâmetro inválido (nome de fila,
-	// atributo com valor fora do range, etc.).
-	ErrCodeInvalidParameterValue = "InvalidParameterValue"
-
-	// ErrCodeMissingParameter: parâmetro obrigatório ausente.
-	ErrCodeMissingParameter = "MissingParameter"
-
-	// ErrCodeOverLimit: limite de mensagens/filas excedido.
-	ErrCodeOverLimit = "OverLimit"
-
-	// ErrCodeUnsupportedOperation: operação não implementada pelo shim.
-	ErrCodeUnsupportedOperation = "UnsupportedOperation"
-
-	// ErrCodeInternalError: erro interno inesperado.
-	ErrCodeInternalError = "InternalError"
-
-	// ErrCodeMessageTooLarge: body da mensagem excede MaximumMessageSize.
-	ErrCodeMessageTooLarge = "MessageTooLarge"
-
-	// ErrCodeReceiptHandleIsInvalid: receipt handle malformado ou expirado.
-	ErrCodeReceiptHandleIsInvalid = "ReceiptHandleIsInvalid"
-
-	// ErrCodePurgeQueueInProgress: PurgeQueue já está rodando para essa fila
-	// (SQS devolve isso se PurgeQueue for chamado em <60s após o anterior).
-	ErrCodePurgeQueueInProgress = "PurgeQueueInProgress"
-
-	// ErrCodeBatchEntryIdsNotDistinct: SendMessageBatch/DeleteMessageBatch com
-	// Ids duplicados dentro do mesmo batch.
+	ErrCodeQueueAlreadyExists       = awserr.CodeQueueAlreadyExists
+	ErrCodeQueueDoesNotExist        = "QueueDoesNotExist"
+	ErrCodeInvalidParameterValue    = awserr.CodeInvalidParameterValue
+	ErrCodeMissingParameter         = awserr.CodeMissingParameter
+	ErrCodeOverLimit                = awserr.CodeOverLimit
+	ErrCodeUnsupportedOperation     = awserr.CodeUnsupportedOperation
+	ErrCodeInternalError            = awserr.CodeInternalError
+	ErrCodeMessageTooLarge          = awserr.CodeMessageTooLarge
+	ErrCodeReceiptHandleIsInvalid   = awserr.CodeReceiptHandleIsInvalid
+	ErrCodePurgeQueueInProgress     = "PurgeQueueInProgress"
 	ErrCodeBatchEntryIdsNotDistinct = "BatchEntryIdsNotDistinct"
-
-	// ErrCodeTooManyEntriesInBatch: SendMessageBatch/DeleteMessageBatch com
-	// mais de 10 entries.
-	ErrCodeTooManyEntriesInBatch = "TooManyEntriesInBatch"
-
-	// ErrCodeEmptyBatchRequest: SendMessageBatch/DeleteMessageBatch sem entries.
-	ErrCodeEmptyBatchRequest = "EmptyBatchRequest"
+	ErrCodeTooManyEntriesInBatch    = "TooManyEntriesInBatch"
+	ErrCodeEmptyBatchRequest        = "EmptyBatchRequest"
 )
+
+func init() {
+	// Registra codes específicos do SQS como sender-fault (4xx).
+	// Cliente AWS faz retry baseado nesta classificação — divergência
+	// aqui causaria comportamento incorreto.
+	//
+	// INCLUI CodeOverLimit, CodeMessageTooLarge, CodeReceiptHandleIsInvalid
+	// mesmo sendo comuns com SNS — os dois serviços usam e ambos são
+	// sender fault. Idempotente (RegisterSenderFaults pode ser chamado
+	// múltiplas vezes).
+	awserr.RegisterSenderFaults(
+		ErrCodeQueueAlreadyExists,
+		ErrCodeQueueDoesNotExist,
+		ErrCodePurgeQueueInProgress,
+		ErrCodeBatchEntryIdsNotDistinct,
+		ErrCodeTooManyEntriesInBatch,
+		ErrCodeEmptyBatchRequest,
+		ErrCodeOverLimit,
+		ErrCodeMessageTooLarge,
+		ErrCodeReceiptHandleIsInvalid,
+	)
+}
+
+// --- AsAWSError — preserva API para call sites legados. ---
+
+// AsAWSError extrai um AWSError de um erro genérico (storage, raw, etc.).
+//
+// Refatorado no refactor/kiss-dry-pass-1 — antes era lógica duplicada
+// em sqs/service.go e sns/service.go. Agora delega ao awserr.FromStorage.
+func AsAWSError(err error) *AWSError {
+	return awserr.FromStorage(err, ErrCodeQueueDoesNotExist)
+}
 
 // Service implementa as operações SQS.
 //
@@ -387,7 +398,7 @@ func GetQueueAttributesParamsFromJSON(params map[string]any) *GetQueueAttributes
 	if s, ok := params["QueueName"].(string); ok && s != "" {
 		p.QueueName = s
 	} else if s, ok := params["QueueUrl"].(string); ok && s != "" {
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if raw, ok := params["AttributeName"]; ok {
 		if arr, ok := raw.([]any); ok {
@@ -481,17 +492,8 @@ func (s *Service) DeleteQueue(ctx context.Context, params *DeleteQueueParams) er
 	return s.storage.Queues().DeleteQueue(ctx, params.QueueName)
 }
 
-// queueNameFromURL extrai o nome da fila da QueueURL.
-//
-// Formato: http(s)://endpoint/<account>/<name>
-// Nome é o último segmento do path.
-func queueNameFromURL(queueURL string) string {
-	idx := strings.LastIndex(queueURL, "/")
-	if idx < 0 || idx == len(queueURL)-1 {
-		return queueURL
-	}
-	return queueURL[idx+1:]
-}
+// queueNameFromURL movido para protocol/QueueNameFromURL
+// (refactor/kiss-dry-pass-1 — compartilhado com storage/nats e SNS).
 
 // --- SendMessageBatch ---
 
@@ -510,16 +512,9 @@ const (
 	MaxMessageAttributes = 10
 )
 
-// messageAttributesSize soma o tamanho on-wire dos atributos (nome +
-// DataType + valor). AWS conta os atributos DENTRO do limite de 256 KiB
-// da mensagem — sem contar, atributos viram bypass ilimitado do limite.
-func messageAttributesSize(attrs map[string]protocol.MessageAttributeValue) int {
-	total := 0
-	for name, v := range attrs {
-		total += len(name) + len(v.DataType) + len(v.StringValue) + len(v.BinaryValue)
-	}
-	return total
-}
+// (messageAttributesSize e maValueToTypes movidos para protocol/message_attribute.go
+// em refactor/kiss-dry-pass-1; agora disponíveis como
+// protocol.MessageAttributesSize e protocol.MessageAttributeToTypes.)
 
 // validateMessageAttributes valida a contagem de message attributes.
 func validateMessageAttributes(attrs map[string]protocol.MessageAttributeValue) *AWSError {
@@ -613,7 +608,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 	}
 
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -646,7 +641,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 			}
 		}
 		// Atributos contam no limite de 256 KiB do batch (igual AWS).
-		totalBodyBytes += len(e.MessageBody) + messageAttributesSize(e.MessageAttributes)
+		totalBodyBytes += len(e.MessageBody) + protocol.MessageAttributesSize(e.MessageAttributes)
 	}
 	if totalBodyBytes > MaxBatchTotalBytes {
 		return nil, &AWSError{
@@ -709,7 +704,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 
 		msg := &types.Message{
 			Body:                   e.MessageBody,
-			MessageAttributes:      maValueToTypes(e.MessageAttributes),
+			MessageAttributes:      protocol.MessageAttributeToTypes(e.MessageAttributes),
 			MessageGroupId:         e.MessageGroupId,
 			MessageDeduplicationId: e.MessageDeduplicationId,
 		}
@@ -749,7 +744,7 @@ func SendMessageBatchParamsFromQuery(params url.Values) *SendMessageBatchParams 
 		QueueName: params.Get("QueueName"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 
 	entries := protocol.ExtractQuerySendMessageBatchEntries(params)
@@ -772,7 +767,7 @@ func SendMessageBatchParamsFromJSON(params map[string]any) *SendMessageBatchPara
 	p := &SendMessageBatchParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -827,7 +822,7 @@ func (s *Service) DeleteMessageBatch(ctx context.Context, params *DeleteMessageB
 	}
 
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -899,7 +894,7 @@ func DeleteMessageBatchParamsFromQuery(params url.Values) *DeleteMessageBatchPar
 		QueueName: params.Get("QueueName"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 
 	entries := protocol.ExtractQueryDeleteMessageBatchEntries(params)
@@ -919,7 +914,7 @@ func DeleteMessageBatchParamsFromJSON(params map[string]any) *DeleteMessageBatch
 	p := &DeleteMessageBatchParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -975,7 +970,7 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 
 	// Resolve QueueName.
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -1010,7 +1005,7 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 	if maxSize == 0 {
 		maxSize = MaxBatchTotalBytes
 	}
-	if len(params.Body)+messageAttributesSize(params.MessageAttributes) > maxSize {
+	if len(params.Body)+protocol.MessageAttributesSize(params.MessageAttributes) > maxSize {
 		return nil, &AWSError{
 			Code:    ErrCodeMessageTooLarge,
 			Message: fmt.Sprintf("Mensagem (body + atributos) excede %d bytes", maxSize),
@@ -1033,7 +1028,7 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 
 	msg := &types.Message{
 		Body:                   params.Body,
-		MessageAttributes:      maValueToTypes(params.MessageAttributes),
+		MessageAttributes:      protocol.MessageAttributeToTypes(params.MessageAttributes),
 		MessageGroupId:         params.MessageGroupId,
 		MessageDeduplicationId: params.MessageDeduplicationId,
 	}
@@ -1072,7 +1067,7 @@ func SendMessageParamsFromQuery(params url.Values) *SendMessageParams {
 		MessageDeduplicationId: params.Get("MessageDeduplicationId"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1082,7 +1077,7 @@ func SendMessageParamsFromJSON(params map[string]any) *SendMessageParams {
 	p := &SendMessageParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1101,23 +1096,6 @@ func SendMessageParamsFromJSON(params map[string]any) *SendMessageParams {
 	}
 	p.MessageAttributes = protocol.ExtractJSONMessageAttributes(params)
 	return p
-}
-
-// maValueToTypes converte map[string]protocol.MessageAttributeValue →
-// map[string]types.MessageAttribute.
-func maValueToTypes(in map[string]protocol.MessageAttributeValue) map[string]types.MessageAttribute {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]types.MessageAttribute, len(in))
-	for k, v := range in {
-		out[k] = types.MessageAttribute{
-			DataType:    v.DataType,
-			StringValue: v.StringValue,
-			BinaryValue: v.BinaryValue,
-		}
-	}
-	return out
 }
 
 // --- ReceiveMessage ---
@@ -1161,7 +1139,7 @@ func (s *Service) ReceiveMessage(ctx context.Context, params *ReceiveMessagePara
 
 	// Resolve QueueName.
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -1260,7 +1238,7 @@ func ReceiveMessageParamsFromQuery(params url.Values) *ReceiveMessageParams {
 		ReceiveRequestAttemptId: params.Get("ReceiveRequestAttemptId"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 
 	// AttributeName.N e MessageAttributeName.N
@@ -1288,7 +1266,7 @@ func ReceiveMessageParamsFromJSON(params map[string]any) *ReceiveMessageParams {
 	p := &ReceiveMessageParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1352,7 +1330,7 @@ func (s *Service) DeleteMessage(ctx context.Context, params *DeleteMessageParams
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1371,7 +1349,7 @@ func DeleteMessageParamsFromQuery(params url.Values) *DeleteMessageParams {
 		ReceiptHandle: params.Get("ReceiptHandle"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1381,7 +1359,7 @@ func DeleteMessageParamsFromJSON(params map[string]any) *DeleteMessageParams {
 	p := &DeleteMessageParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1417,7 +1395,7 @@ func (s *Service) ChangeMessageVisibility(ctx context.Context, params *ChangeMes
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1437,7 +1415,7 @@ func ChangeMessageVisibilityParamsFromQuery(params url.Values) *ChangeMessageVis
 		VisibilityTimeout: parseInt32Default(params.Get("VisibilityTimeout"), 0),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1447,7 +1425,7 @@ func ChangeMessageVisibilityParamsFromJSON(params map[string]any) *ChangeMessage
 	p := &ChangeMessageVisibilityParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1482,7 +1460,7 @@ func (s *Service) PurgeQueue(ctx context.Context, params *PurgeQueueParams) erro
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1500,7 +1478,7 @@ func PurgeQueueParamsFromQuery(params url.Values) *PurgeQueueParams {
 		QueueURL:  params.Get("QueueUrl"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1510,7 +1488,7 @@ func PurgeQueueParamsFromJSON(params map[string]any) *PurgeQueueParams {
 	p := &PurgeQueueParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1536,7 +1514,7 @@ func (s *Service) SetQueueAttributes(ctx context.Context, params *SetQueueAttrib
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1567,7 +1545,7 @@ func SetQueueAttributesParamsFromQuery(params url.Values) *SetQueueAttributesPar
 		Attributes: extractAttributes(params, "Attribute"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1577,7 +1555,7 @@ func SetQueueAttributesParamsFromJSON(params map[string]any) *SetQueueAttributes
 	p := &SetQueueAttributesParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1591,7 +1569,7 @@ func SetQueueAttributesParamsFromJSON(params map[string]any) *SetQueueAttributes
 func DeleteQueueParamsFromQuery(params url.Values) *DeleteQueueParams {
 	name := params.Get("QueueName")
 	if name == "" {
-		name = queueNameFromURL(params.Get("QueueUrl"))
+		name = protocol.QueueNameFromURL(params.Get("QueueUrl"))
 	}
 	return &DeleteQueueParams{QueueName: name}
 }
@@ -1602,7 +1580,7 @@ func DeleteQueueParamsFromJSON(params map[string]any) *DeleteQueueParams {
 	if s, ok := params["QueueName"].(string); ok && s != "" {
 		p.QueueName = s
 	} else if s, ok := params["QueueUrl"].(string); ok && s != "" {
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	return p
 }
@@ -1713,65 +1691,4 @@ func parseInt32Default(s string, def int32) int32 {
 		return def
 	}
 	return int32(n)
-}
-
-// AWSError representa um erro com código oficial AWS.
-type AWSError struct {
-	Code    string
-	Message string
-}
-
-// Error implementa error.
-func (e *AWSError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
-}
-
-// IsSenderFault retorna true se o erro é culpa do cliente (4xx-style).
-func (e *AWSError) IsSenderFault() bool {
-	switch e.Code {
-	case ErrCodeQueueAlreadyExists, ErrCodeQueueDoesNotExist,
-		ErrCodeInvalidParameterValue, ErrCodeMissingParameter,
-		ErrCodeOverLimit, ErrCodeMessageTooLarge,
-		ErrCodeBatchEntryIdsNotDistinct, ErrCodeTooManyEntriesInBatch,
-		ErrCodeEmptyBatchRequest:
-		return true
-	}
-	return false
-}
-
-// AsAWSError tenta extrair um AWSError de um erro genérico.
-// Se não conseguir, cria um AWSError InternalError.
-func AsAWSError(err error) *AWSError {
-	if err == nil {
-		return nil
-	}
-	var awsErr *AWSError
-	if errors.As(err, &awsErr) {
-		return awsErr
-	}
-	if errors.Is(err, storage.ErrQueueNotFound) {
-		return &AWSError{Code: ErrCodeQueueDoesNotExist, Message: err.Error()}
-	}
-	if errors.Is(err, storage.ErrQueueAlreadyExists) {
-		return &AWSError{Code: ErrCodeQueueAlreadyExists, Message: err.Error()}
-	}
-	if errors.Is(err, storage.ErrQueueFull) {
-		// Backlog da fila cheio (DiscardNew rejeitou o publish). OverLimit
-		// sinaliza ao cliente para fazer backoff — nunca descartamos
-		// mensagens antigas silenciosamente.
-		return &AWSError{Code: ErrCodeOverLimit, Message: "fila atingiu o limite de backlog; tente novamente"}
-	}
-	var tooLarge storage.ErrMessageTooLargeT
-	if errors.As(err, &tooLarge) {
-		return &AWSError{Code: ErrCodeMessageTooLarge, Message: err.Error()}
-	}
-	var invalidRH storage.ErrInvalidReceiptHandleT
-	if errors.As(err, &invalidRH) {
-		return &AWSError{Code: ErrCodeReceiptHandleIsInvalid, Message: err.Error()}
-	}
-	var invalidArg storage.ErrInvalidArgumentT
-	if errors.As(err, &invalidArg) {
-		return &AWSError{Code: ErrCodeInvalidParameterValue, Message: err.Error()}
-	}
-	return &AWSError{Code: ErrCodeInternalError, Message: err.Error()}
 }

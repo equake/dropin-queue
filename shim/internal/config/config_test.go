@@ -20,8 +20,8 @@ func TestDefault(t *testing.T) {
 	if c.AuthMode != AuthModeOff {
 		t.Errorf("AuthMode default deve ser 'off' para dev safe, got %s", c.AuthMode)
 	}
-	if c.MaxRequestBodyBytes != 262144 {
-		t.Errorf("MaxRequestBodyBytes deve ser 256KiB, got %d", c.MaxRequestBodyBytes)
+	if c.MaxRequestBodyBytes != 5*1024*1024 {
+		t.Errorf("MaxRequestBodyBytes deve ser 5MB (cobre SQS+SNS), got %d", c.MaxRequestBodyBytes)
 	}
 }
 

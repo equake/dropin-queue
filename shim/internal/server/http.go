@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -53,14 +54,28 @@ type Server struct {
 	addr     string
 	srv      *http.Server
 	router   *chi.Mux
+
+	// maxBodyBytes limita bytes de body por request em roteamento.
+	// Vem de cfg.MaxRequestBodyBytes (default 256 KiB). Antes do
+	// refactor/kiss-dry-pass-1 era literal 1 MB hardcoded em
+	// isSNSQueryRequest.
+	maxBodyBytes int64
 }
 
 // New constrói um Server pronto para ListenAndServe.
-func New(addr string, h *Handlers) *Server {
+//
+// maxBodyBytes limita o tamanho de body aceito (deve bater com
+// cfg.MaxRequestBodyBytes para defesa em profundidade contra oversize).
+// Default 5 MB se não fornecido.
+func New(addr string, h *Handlers, maxBodyBytes int64) *Server {
+	if maxBodyBytes <= 0 {
+		maxBodyBytes = 5 << 20 // 5 MB; cobre SQS+SNS no pior caso
+	}
 	s := &Server{
-		handlers: h,
-		addr:     addr,
-		router:   chi.NewRouter(),
+		handlers:     h,
+		addr:         addr,
+		router:       chi.NewRouter(),
+		maxBodyBytes: maxBodyBytes,
 	}
 	s.routes()
 	s.srv = &http.Server{
@@ -109,72 +124,94 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // --- Handlers ---
 
 // handleAWS é o entrypoint principal para todas as operações AWS.
-// Detecta protocolo (Query vs JSON), parse, dispatch, encode response.
+//
+// Pré-fix (refactor/kiss-dry-pass-1) o roteamento lia o body 1× para
+// detectar SQS vs SNS (sniff), depois parseava dnv no handler — 2 RTTs
+// de parsing por request. Agora lemos o body 1× com limite de
+// cfg.MaxRequestBodyBytes e parseamos direto. Substituímos o body do
+// request por um buffer, e o handler downstream lê desse buffer.
+//
+// Detecção de protocolo:
+//  1. Content-Type = application/x-amz-json-* → JSON path (decide
+//     SQS vs SNS via X-Amz-Target prefix).
+//  2. Senão, ler body. O `Action=` é a única forma de discriminar SQS
+//     vs SNS em Query protocol.
+//
+// Fail-fast: body inválido ou > limite → erro coerente antes de dispatch.
 func (s *Server) handleAWS(w http.ResponseWriter, r *http.Request) {
-	// Detecta serviço (SQS vs SNS) baseado em X-Amz-Target prefix (JSON)
-	// ou namespace do body (Query — não há header, mas SNS usa Action
-	// list própria).
 	if isJSONProtocol(r) {
-		// JSON: usa X-Amz-Target prefix.
-		target := r.Header.Get("X-Amz-Target")
-		if strings.HasPrefix(target, "AmazonSNS.") {
-			s.handleSNSJSON(w, r)
-			return
-		}
-		s.handleAWSJSON(w, r)
+		s.handleAWSJSONDispatch(w, r)
 		return
 	}
-	// Query: precisamos sniff o Action antes de parsear.
-	// Lemos o body pequeno só para identificar (SNS tem Action values distintos).
-	if isSNSQueryRequest(r) {
+	s.handleAWSQueryDispatch(w, r)
+}
+
+// handleAWSJSONDispatch roteia requests JSON 1.0 entre SQS e SNS.
+//
+// O r.Body permanece intocado (cada parser lê o body inteiro uma vez);
+// a única "discriminação" extra é a string X-Amz-Target que já está
+// em headers — sem sniff.
+func (s *Server) handleAWSJSONDispatch(w http.ResponseWriter, r *http.Request) {
+	target := r.Header.Get("X-Amz-Target")
+	if strings.HasPrefix(target, "AmazonSNS.") {
+		s.handleSNSJSON(w, r)
+		return
+	}
+	s.handleAWSJSON(w, r)
+}
+
+// handleAWSQueryDispatch lê o body 1× com limite explícito e roteia
+// Query requests SQS vs SNS.
+//
+// Substitui o pré-fix isSNSQueryRequest que lia 1 MB do body, parseava,
+// e RESTAURAVA o body para o handler reler (desperdício de CPU + memória
+// em cada request, com risco de silent fallback se body > 1 MB).
+func (s *Server) handleAWSQueryDispatch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxBodyBytes))
+	if err != nil {
+		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", "falha ao ler body: "+err.Error(), newRequestID())
+		return
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Discrimina SQS vs SNS pelo `Action` value (única forma em Query).
+	vals, perr := url.ParseQuery(string(body))
+	if perr != nil {
+		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", "falha ao parsear body: "+perr.Error(), newRequestID())
+		return
+	}
+	if isSNSAction(protocol.Action(vals.Get("Action"))) {
 		s.handleSNSQuery(w, r)
 		return
 	}
 	s.handleAWSQuery(w, r)
 }
 
-// isSNSQueryRequest detecta se um request Query é SNS (vs SQS).
+// isSNSAction retorna true se a Action pertence ao set SNS.
 //
-// Estratégia: lê o body (até maxQuerySniffBytes) e checa se Action está no
-// set SNS. O sniff é feito no início do body — Action sempre vem primeiro
-// (boto3 ordena alfabeticamente: Action, ...), então ler o início basta.
-//
-// O body lido é restaurado em r.Body para que o handler posterior possa
-// parseá-lo completamente (Publish com Message grande exige isso).
-const maxQuerySniffBytes = 1 << 20 // 1 MB — maior que max body útil
-
-func isSNSQueryRequest(r *http.Request) bool {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxQuerySniffBytes))
-	if err != nil {
-		return false
-	}
-	_ = r.Body.Close()
-	r.Body = io.NopCloser(strings.NewReader(string(body)))
-
-	vals, err := url.ParseQuery(string(body))
-	if err != nil {
-		return false
-	}
-	action := vals.Get("Action")
-	switch protocol.Action(action) {
+// ListSubscriptionsByTopic NÃO tem Action dedicada no protocolo AWS
+// usado em conjunto com format `entry.N.Name/Value` envelope —
+// boto3 manda Action=ListSubscriptionsByTopic (não ListSubscriptions).
+// Incluímos explicitamente.
+func isSNSAction(action protocol.Action) bool {
+	switch action {
 	case protocol.ActionCreateTopic, protocol.ActionGetTopicAttributes,
 		protocol.ActionListTopics, protocol.ActionSubscribe,
 		protocol.ActionUnsubscribe, protocol.ActionDeleteTopic,
 		protocol.ActionPublish, protocol.ActionListSubscriptions,
+		protocol.ActionListSubscriptionsByTopic,
 		protocol.ActionConfirmSubscription:
 		return true
 	}
-	// ListSubscriptionsByTopic não tem Action dedicada no protocolo AWS —
-	// usa ListSubscriptions com TopicArn no body. Mas como Action é
-	// "ListSubscriptions", cai em SQS parse → erro. Tratamos explicitamente.
-	return action == "ListSubscriptionsByTopic"
+	return false
 }
 
 // handleAWSQuery trata requests SQS no protocolo Query (form-encoded + XML).
 func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 	action, params, err := protocol.ParseSQSQueryRequest(r)
 	if err != nil {
-		writeSQSFatalError(w, "InvalidParameterValue", err.Error(), newRequestID())
+		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", err.Error(), newRequestID())
 		return
 	}
 
@@ -206,7 +243,7 @@ func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 	case protocol.ActionDeleteMessageBatch:
 		s.handleDeleteMessageBatchQuery(w, r, params)
 	default:
-		writeSQSFatalError(w, "UnsupportedOperation",
+		writeFatalError(w, transportSQSQuery, "UnsupportedOperation",
 			fmt.Sprintf("Action %q ainda não implementada", action), newRequestID())
 	}
 }
@@ -215,7 +252,7 @@ func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 	action, params, err := protocol.ParseSQSJSONRequest(r)
 	if err != nil {
-		writeSQSJSONFatalError(w, "InvalidParameterValue", err.Error())
+		writeFatalError(w, transportSQSJSON, "InvalidParameterValue", err.Error(), newRequestID())
 		return
 	}
 
@@ -247,8 +284,8 @@ func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 	case protocol.ActionDeleteMessageBatch:
 		s.handleDeleteMessageBatchJSON(w, r, params)
 	default:
-		writeSQSJSONFatalError(w, "UnsupportedOperation",
-			fmt.Sprintf("Action %q ainda não implementada", action))
+		writeFatalError(w, transportSQSJSON, "UnsupportedOperation",
+			fmt.Sprintf("Action %q ainda não implementada", action), newRequestID())
 	}
 }
 
@@ -263,8 +300,8 @@ func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, 
 	q, err := s.handlers.SQS.CreateQueue(r.Context(), cqp)
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
-		observability.ObserveHTTP("sqs", string(protocol.ActionCreateQueue), statusFromAWSError(awsErr), 0)
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		observability.ObserveHTTP("sqs", string(protocol.ActionCreateQueue), httpStatusLabel(awsErr), 0)
 		return
 	}
 
@@ -301,7 +338,7 @@ func (s *Server) handleCreateQueueJSON(w http.ResponseWriter, r *http.Request, p
 	q, err := s.handlers.SQS.CreateQueue(r.Context(), cqp)
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -310,25 +347,10 @@ func (s *Server) handleCreateQueueJSON(w http.ResponseWriter, r *http.Request, p
 	_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
 }
 
-// writeSQSJSONFatalError serializa erro SQS JSON 1.0 com status correto.
-func writeSQSJSONFatalError(w http.ResponseWriter, code, message string) {
-	awsErr := &sqs.AWSError{Code: code, Message: message}
-	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-	status := http.StatusInternalServerError
-	if awsErr.IsSenderFault() {
-		status = http.StatusBadRequest
-	}
-	w.WriteHeader(status)
-	_ = protocol.EncodeSQSJSONError(w, code, message)
-}
-
-// statusFromAWSError converte classificação para string de status HTTP.
-func statusFromAWSError(e *sqs.AWSError) string {
-	if e.IsSenderFault() {
-		return "400"
-	}
-	return "500"
-}
+// writeSQSJSONFatalError e writeSQSFatalError foram para response.go
+// (refactor/kiss-dry-pass-1 Commit 6) — consolidados em writeFatalError.
+// statusFromAWSError idem — usa http.StatusBadRequest /
+// http.StatusInternalServerError diretamente em ObserveHTTP label.
 
 // --- Handlers Query (XML) ---
 
@@ -337,7 +359,7 @@ func (s *Server) handleGetQueueUrlQuery(w http.ResponseWriter, r *http.Request, 
 	q, err := s.handlers.SQS.GetQueueUrl(r.Context(), sqs.GetQueueUrlParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -371,7 +393,7 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 	attrs, err := s.handlers.SQS.GetQueueAttributes(r.Context(), sqs.GetQueueAttributesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -421,7 +443,7 @@ func (s *Server) handleListQueuesQuery(w http.ResponseWriter, r *http.Request, p
 	res, err := s.handlers.SQS.ListQueues(r.Context(), sqs.ListQueuesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -455,7 +477,7 @@ func (s *Server) handleDeleteQueueQuery(w http.ResponseWriter, r *http.Request, 
 	err := s.handlers.SQS.DeleteQueue(r.Context(), sqs.DeleteQueueParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -483,7 +505,7 @@ func (s *Server) handleGetQueueUrlJSON(w http.ResponseWriter, r *http.Request, p
 	q, err := s.handlers.SQS.GetQueueUrl(r.Context(), sqs.GetQueueUrlParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -495,7 +517,7 @@ func (s *Server) handleGetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	attrs, err := s.handlers.SQS.GetQueueAttributes(r.Context(), sqs.GetQueueAttributesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	// AWS JSON 1.0 GetQueueAttributes devolve {"Attributes": {"name": "value", ...}}
@@ -510,7 +532,7 @@ func (s *Server) handleListQueuesJSON(w http.ResponseWriter, r *http.Request, pa
 	res, err := s.handlers.SQS.ListQueues(r.Context(), sqs.ListQueuesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -524,7 +546,7 @@ func (s *Server) handleDeleteQueueJSON(w http.ResponseWriter, r *http.Request, p
 	err := s.handlers.SQS.DeleteQueue(r.Context(), sqs.DeleteQueueParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -539,7 +561,7 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 	res, err := s.handlers.SQS.SendMessage(r.Context(), sqs.SendMessageParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -578,7 +600,7 @@ func (s *Server) handleSendMessageJSON(w http.ResponseWriter, r *http.Request, p
 	res, err := s.handlers.SQS.SendMessage(r.Context(), sqs.SendMessageParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -596,7 +618,7 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 	res, err := s.handlers.SQS.ReceiveMessage(r.Context(), sqs.ReceiveMessageParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -682,7 +704,7 @@ func (s *Server) handleReceiveMessageJSON(w http.ResponseWriter, r *http.Request
 	res, err := s.handlers.SQS.ReceiveMessage(r.Context(), sqs.ReceiveMessageParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 
@@ -725,7 +747,7 @@ func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request
 	err := s.handlers.SQS.DeleteMessage(r.Context(), sqs.DeleteMessageParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type response struct {
@@ -750,7 +772,7 @@ func (s *Server) handleDeleteMessageJSON(w http.ResponseWriter, r *http.Request,
 	err := s.handlers.SQS.DeleteMessage(r.Context(), sqs.DeleteMessageParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -764,7 +786,7 @@ func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *ht
 	err := s.handlers.SQS.ChangeMessageVisibility(r.Context(), sqs.ChangeMessageVisibilityParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type response struct {
@@ -789,7 +811,7 @@ func (s *Server) handleChangeMessageVisibilityJSON(w http.ResponseWriter, r *htt
 	err := s.handlers.SQS.ChangeMessageVisibility(r.Context(), sqs.ChangeMessageVisibilityParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -803,7 +825,7 @@ func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, p
 	err := s.handlers.SQS.PurgeQueue(r.Context(), sqs.PurgeQueueParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type response struct {
@@ -828,7 +850,7 @@ func (s *Server) handlePurgeQueueJSON(w http.ResponseWriter, r *http.Request, pa
 	err := s.handlers.SQS.PurgeQueue(r.Context(), sqs.PurgeQueueParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -842,7 +864,7 @@ func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 	err := s.handlers.SQS.SetQueueAttributes(r.Context(), sqs.SetQueueAttributesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type response struct {
@@ -867,7 +889,7 @@ func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	err := s.handlers.SQS.SetQueueAttributes(r.Context(), sqs.SetQueueAttributesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -914,7 +936,7 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -977,7 +999,7 @@ func (s *Server) handleSendMessageBatchJSON(w http.ResponseWriter, r *http.Reque
 	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1031,7 +1053,7 @@ func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Re
 	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -1077,7 +1099,7 @@ func (s *Server) handleDeleteMessageBatchJSON(w http.ResponseWriter, r *http.Req
 	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1133,30 +1155,8 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 
 // isJSONProtocol detecta se a request usa AWS JSON 1.0.
 //
-// Critério: header X-Amz-Target presente (típico de JSON 1.0) E Content-Type
-// começa com application/x-amz-json.
-func isJSONProtocol(r *http.Request) bool {
-	target := r.Header.Get("X-Amz-Target")
-	ct := r.Header.Get("Content-Type")
-	if target == "" {
-		return false
-	}
-	return len(ct) >= 22 && ct[:22] == "application/x-amz-json"
-}
-
-// writeSQSFatalError serializa um erro SQS no formato XML.
-//
-// Códigos diferentes de 200 conforme tipo do erro (Sender → 400, Receiver → 500).
-func writeSQSFatalError(w http.ResponseWriter, code, message, requestID string) {
-	awsErr := &sqs.AWSError{Code: code, Message: message}
-	w.Header().Set("Content-Type", "text/xml")
-	status := http.StatusInternalServerError
-	if awsErr.IsSenderFault() {
-		status = http.StatusBadRequest
-	}
-	w.WriteHeader(status)
-	_ = protocol.EncodeSQSQueryError(w, code, message, requestID, awsErr.IsSenderFault())
-}
+// isJSONProtocol foi para response.go (refactor/kiss-dry-pass-1 Commit 6).
+// Detectado por detectTransport que usa internamente.
 
 // newRequestID gera um request ID único estilo AWS (hex 16 chars).
 func newRequestID() string {
@@ -1174,7 +1174,7 @@ func newRequestID() string {
 func (s *Server) handleSNSQuery(w http.ResponseWriter, r *http.Request) {
 	action, params, err := protocol.ParseSNSQueryRequest(r)
 	if err != nil {
-		writeSNSFatalError(w, "InvalidParameterValue", err.Error(), newRequestID())
+		writeFatalError(w, transportSNSQuery, "InvalidParameterValue", err.Error(), newRequestID())
 		return
 	}
 
@@ -1200,7 +1200,7 @@ func (s *Server) handleSNSQuery(w http.ResponseWriter, r *http.Request) {
 	case protocol.ActionConfirmSubscription:
 		s.handleSNSConfirmSubscriptionQuery(w, r, params)
 	default:
-		writeSNSFatalError(w, "UnsupportedOperation",
+		writeFatalError(w, transportSNSQuery, "UnsupportedOperation",
 			fmt.Sprintf("Action SNS %q não implementada", action), newRequestID())
 	}
 }
@@ -1209,7 +1209,7 @@ func (s *Server) handleSNSQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSNSJSON(w http.ResponseWriter, r *http.Request) {
 	action, params, err := protocol.ParseSNSJSONRequest(r)
 	if err != nil {
-		writeSNSJSONFatalError(w, "InvalidParameterValue", err.Error())
+		writeFatalError(w, transportSNSJSON, "InvalidParameterValue", err.Error(), newRequestID())
 		return
 	}
 
@@ -1235,8 +1235,8 @@ func (s *Server) handleSNSJSON(w http.ResponseWriter, r *http.Request) {
 	case protocol.ActionConfirmSubscription:
 		s.handleSNSConfirmSubscriptionJSON(w, r, params)
 	default:
-		writeSNSJSONFatalError(w, "UnsupportedOperation",
-			fmt.Sprintf("Action SNS %q não implementada", action))
+		writeFatalError(w, transportSNSJSON, "UnsupportedOperation",
+			fmt.Sprintf("Action SNS %q não implementada", action), newRequestID())
 	}
 }
 
@@ -1246,7 +1246,7 @@ func (s *Server) handleSNSCreateTopicQuery(w http.ResponseWriter, r *http.Reques
 	res, err := s.handlers.SNS.CreateTopic(r.Context(), sns.CreateTopicParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type result struct {
@@ -1277,7 +1277,7 @@ func (s *Server) handleSNSGetTopicAttributesQuery(w http.ResponseWriter, r *http
 	res, err := s.handlers.SNS.GetTopicAttributes(r.Context(), sns.GetTopicAttributesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	// SNS GetTopicAttributes retorna uma lista de member pairs (Name, Value).
@@ -1324,7 +1324,7 @@ func (s *Server) handleSNSListTopicsQuery(w http.ResponseWriter, r *http.Request
 	res, err := s.handlers.SNS.ListTopics(r.Context(), sns.ListTopicsParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type topicMember struct {
@@ -1368,7 +1368,7 @@ func (s *Server) handleSNSDeleteTopicQuery(w http.ResponseWriter, r *http.Reques
 	err := s.handlers.SNS.DeleteTopic(r.Context(), sns.DeleteTopicParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type response struct {
@@ -1393,7 +1393,7 @@ func (s *Server) handleSNSSubscribeQuery(w http.ResponseWriter, r *http.Request,
 	res, err := s.handlers.SNS.Subscribe(r.Context(), sns.SubscribeParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type result struct {
@@ -1424,7 +1424,7 @@ func (s *Server) handleSNSUnsubscribeQuery(w http.ResponseWriter, r *http.Reques
 	err := s.handlers.SNS.Unsubscribe(r.Context(), sns.UnsubscribeParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type response struct {
@@ -1449,7 +1449,7 @@ func (s *Server) handleSNSPublishQuery(w http.ResponseWriter, r *http.Request, p
 	res, err := s.handlers.SNS.Publish(r.Context(), sns.PublishParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type result struct {
@@ -1481,7 +1481,7 @@ func (s *Server) handleSNSListSubscriptionsQuery(w http.ResponseWriter, r *http.
 	res, err := s.handlers.SNS.ListSubscriptions(r.Context(), sns.ListSubscriptionsParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	s.writeSubscriptionsXML(w, res.Subscriptions, res.NextToken, "ListSubscriptionsResponse", "ListSubscriptionsResult")
@@ -1491,7 +1491,7 @@ func (s *Server) handleSNSListSubscriptionsByTopicQuery(w http.ResponseWriter, r
 	res, err := s.handlers.SNS.ListSubscriptionsByTopic(r.Context(), sns.ListSubscriptionsByTopicParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	s.writeSubscriptionsXML(w, res.Subscriptions, res.NextToken, "ListSubscriptionsByTopicResponse", "ListSubscriptionsByTopicResult")
@@ -1501,7 +1501,7 @@ func (s *Server) handleSNSConfirmSubscriptionQuery(w http.ResponseWriter, r *htt
 	res, err := s.handlers.SNS.ConfirmSubscription(r.Context(), sns.ConfirmSubscriptionParamsFromQuery(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type result struct {
@@ -1588,7 +1588,7 @@ func (s *Server) handleSNSCreateTopicJSON(w http.ResponseWriter, r *http.Request
 	res, err := s.handlers.SNS.CreateTopic(r.Context(), sns.CreateTopicParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1600,7 +1600,7 @@ func (s *Server) handleSNSGetTopicAttributesJSON(w http.ResponseWriter, r *http.
 	res, err := s.handlers.SNS.GetTopicAttributes(r.Context(), sns.GetTopicAttributesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type attr struct {
@@ -1625,7 +1625,7 @@ func (s *Server) handleSNSListTopicsJSON(w http.ResponseWriter, r *http.Request,
 	res, err := s.handlers.SNS.ListTopics(r.Context(), sns.ListTopicsParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	type topicOut struct {
@@ -1649,7 +1649,7 @@ func (s *Server) handleSNSDeleteTopicJSON(w http.ResponseWriter, r *http.Request
 	err := s.handlers.SNS.DeleteTopic(r.Context(), sns.DeleteTopicParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1661,7 +1661,7 @@ func (s *Server) handleSNSSubscribeJSON(w http.ResponseWriter, r *http.Request, 
 	res, err := s.handlers.SNS.Subscribe(r.Context(), sns.SubscribeParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1673,7 +1673,7 @@ func (s *Server) handleSNSUnsubscribeJSON(w http.ResponseWriter, r *http.Request
 	err := s.handlers.SNS.Unsubscribe(r.Context(), sns.UnsubscribeParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1685,7 +1685,7 @@ func (s *Server) handleSNSPublishJSON(w http.ResponseWriter, r *http.Request, pa
 	res, err := s.handlers.SNS.Publish(r.Context(), sns.PublishParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1701,7 +1701,7 @@ func (s *Server) handleSNSListSubscriptionsJSON(w http.ResponseWriter, r *http.R
 	res, err := s.handlers.SNS.ListSubscriptions(r.Context(), sns.ListSubscriptionsParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	s.writeSubscriptionsJSON(w, res.Subscriptions, res.NextToken)
@@ -1711,7 +1711,7 @@ func (s *Server) handleSNSListSubscriptionsByTopicJSON(w http.ResponseWriter, r 
 	res, err := s.handlers.SNS.ListSubscriptionsByTopic(r.Context(), sns.ListSubscriptionsByTopicParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	s.writeSubscriptionsJSON(w, res.Subscriptions, res.NextToken)
@@ -1721,7 +1721,7 @@ func (s *Server) handleSNSConfirmSubscriptionJSON(w http.ResponseWriter, r *http
 	res, err := s.handlers.SNS.ConfirmSubscription(r.Context(), sns.ConfirmSubscriptionParamsFromJSON(params))
 	if err != nil {
 		awsErr := sns.AsAWSError(err)
-		writeSNSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		writeFatalError(w, transportSNSJSON, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -1757,29 +1757,7 @@ func (s *Server) writeSubscriptionsJSON(w http.ResponseWriter, subs []types.Subs
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// --- SNS error helpers ---
-
-func writeSNSFatalError(w http.ResponseWriter, code, message, requestID string) {
-	awsErr := &sns.AWSError{Code: code, Message: message}
-	w.Header().Set("Content-Type", "text/xml")
-	status := http.StatusInternalServerError
-	if awsErr.IsSenderFault() {
-		status = http.StatusBadRequest
-	}
-	w.WriteHeader(status)
-	_ = protocol.EncodeSNSQueryError(w, code, message, requestID, awsErr.IsSenderFault())
-}
-
-func writeSNSJSONFatalError(w http.ResponseWriter, code, message string) {
-	awsErr := &sns.AWSError{Code: code, Message: message}
-	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-	status := http.StatusInternalServerError
-	if awsErr.IsSenderFault() {
-		status = http.StatusBadRequest
-	}
-	w.WriteHeader(status)
-	_ = protocol.EncodeSNSJSONError(w, code, message)
-}
-
+// --- SNS error helpers foram para response.go (writeFatalError).
+//
 // ensure unused imports compile in older Go versions
 var _ = errors.New

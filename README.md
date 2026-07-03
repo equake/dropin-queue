@@ -82,8 +82,8 @@ A camada de API é um **shim em Go** (`dropin-server`) que implementa:
 - **ConfirmSubscription** stub (UnsupportedOperation no MVP; subscriptions
   HTTP/HTTPS ficam pending)
 
-**Cobertura de testes:** 70/70 passando (12 SQS smoke + 15 SQS messages +
-18 SQS batch + 5 SQS limits + 20 SNS) em ~60s contra shim rodando em
+**Cobertura de testes:** 72/72 passando (12 SQS smoke + 15 SQS messages +
+18 SQS batch + 7 SQS limits + 20 SNS) em ~50s contra shim rodando em
 docker-compose com NATS JetStream 2.14 + MinIO.
 
 ### Funcionalidades SQS implementadas

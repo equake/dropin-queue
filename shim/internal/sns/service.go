@@ -14,45 +14,59 @@ package sns
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 
+	"github.com/equake/dropin-queue/shim/internal/awserr"
 	"github.com/equake/dropin-queue/shim/internal/observability"
 	"github.com/equake/dropin-queue/shim/internal/protocol"
 	"github.com/equake/dropin-queue/shim/internal/storage"
 	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
+// AWSError é alias para awserr.Error (preserva call sites do pacote sns).
+//
+// Pré-refactor (refactor/kiss-dry-pass-1) existia AWSError local em sqs/
+// e sns/ — agora compartilhado, com classificação sender-fault registrada
+// explicitamente via RegisterSenderFaults em init().
+type AWSError = awserr.Error
+
 // AWSErrorCode são os códigos oficiais AWS SNS para erros que devolvemos.
+//
+// Específicos do SNS (TopicAlreadyExists etc.) ficam aqui; codes
+// compartilhados com SQS vêm de awserr.
 const (
-	// ErrCodeTopicAlreadyExists: tentativa de criar tópico existente
-	// com atributos diferentes (SNS não é idempotente como SQS — esta é
-	// uma divergência aceita no MVP).
-	ErrCodeTopicAlreadyExists = "TopicAlreadyExists"
-
-	// ErrCodeTopicDoesNotExist: operação em tópico inexistente.
-	ErrCodeTopicDoesNotExist = "TopicDoesNotExist"
-
-	// ErrCodeInvalidParameterValue: parâmetro inválido.
-	ErrCodeInvalidParameterValue = "InvalidParameterValue"
-
-	// ErrCodeMissingParameter: parâmetro obrigatório ausente.
-	ErrCodeMissingParameter = "MissingParameter"
-
-	// ErrCodeInternalError: erro interno inesperado.
-	ErrCodeInternalError = "InternalError"
-
-	// ErrCodeInvalidProtocol: protocolo de subscription não suportado.
-	ErrCodeInvalidProtocol = "InvalidParameter"
-
-	// ErrCodeSubscriptionDoesNotExist: Unsubscribe em ARN inexistente.
+	// Específicos SNS:
+	ErrCodeTopicAlreadyExists       = "TopicAlreadyExists"
+	ErrCodeTopicDoesNotExist        = "TopicDoesNotExist"
+	ErrCodeInvalidProtocol          = "InvalidParameter"
 	ErrCodeSubscriptionDoesNotExist = "SubscriptionDoesNotExist"
 
-	// ErrCodeUnsupportedOperation: operação não implementada pelo shim.
-	ErrCodeUnsupportedOperation = "UnsupportedOperation"
+	// Compartilhados com AWS API (definidos em awserr):
+	ErrCodeInvalidParameterValue = awserr.CodeInvalidParameterValue
+	ErrCodeMissingParameter      = awserr.CodeMissingParameter
+	ErrCodeInternalError         = awserr.CodeInternalError
+	ErrCodeUnsupportedOperation  = awserr.CodeUnsupportedOperation
 )
+
+func init() {
+	// Registra codes específicos do SNS como sender-fault (4xx).
+	awserr.RegisterSenderFaults(
+		ErrCodeTopicAlreadyExists,
+		ErrCodeTopicDoesNotExist,
+		ErrCodeInvalidProtocol,
+		ErrCodeSubscriptionDoesNotExist,
+	)
+}
+
+// AsAWSError extrai um AWSError de um erro genérico.
+//
+// Refatorado no refactor/kiss-dry-pass-1: delega ao awserr.FromStorage.
+// O notFoundCode passado é "TopicDoesNotExist" (específico SNS).
+func AsAWSError(err error) *AWSError {
+	return awserr.FromStorage(err, ErrCodeTopicDoesNotExist)
+}
 
 // Service implementa as operações SNS.
 //
@@ -183,7 +197,7 @@ func (s *Service) GetTopicAttributes(ctx context.Context, params *GetTopicAttrib
 		}
 	}
 
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -277,7 +291,7 @@ func (s *Service) DeleteTopic(ctx context.Context, params *DeleteTopicParams) er
 			Message: "TopicArn é obrigatório",
 		}
 	}
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -556,7 +570,7 @@ func (s *Service) ListSubscriptionsByTopic(ctx context.Context, params *ListSubs
 			Message: "TopicArn é obrigatório",
 		}
 	}
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -634,7 +648,7 @@ func (s *Service) Publish(ctx context.Context, params *PublishParams) (*PublishR
 		}
 	}
 
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -644,7 +658,7 @@ func (s *Service) Publish(ctx context.Context, params *PublishParams) (*PublishR
 
 	msg := &types.Message{
 		Body:              params.Message,
-		MessageAttributes: maValueToTypes(params.MessageAttributes),
+		MessageAttributes: protocol.MessageAttributeToTypes(params.MessageAttributes),
 	}
 	// Subject vai como MessageAttribute "Subject" (alguns clients esperam).
 	if params.Subject != "" {
@@ -694,22 +708,6 @@ func PublishParamsFromJSON(params map[string]any) *PublishParams {
 	return p
 }
 
-// maValueToTypes converte map[string]protocol.MessageAttributeValue → map[string]types.MessageAttribute.
-func maValueToTypes(in map[string]protocol.MessageAttributeValue) map[string]types.MessageAttribute {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]types.MessageAttribute, len(in))
-	for k, v := range in {
-		out[k] = types.MessageAttribute{
-			DataType:    v.DataType,
-			StringValue: v.StringValue,
-			BinaryValue: v.BinaryValue,
-		}
-	}
-	return out
-}
-
 // --- ConfirmSubscription (stub) ---
 
 // ConfirmSubscriptionParams contém os parâmetros.
@@ -751,16 +749,9 @@ func ConfirmSubscriptionParamsFromJSON(params map[string]any) *ConfirmSubscripti
 
 // --- helpers ---
 
-// extractTopicName extrai o nome do tópico de um ARN SNS.
-//
-// Formato: arn:aws:sns:<region>:<account>:<name>
-func extractTopicName(arn string) string {
-	parts := strings.Split(arn, ":")
-	if len(parts) < 6 {
-		return ""
-	}
-	return parts[5]
-}
+// extractTopicName movido para protocol.ResourceNameFromARN
+// (refactor/kiss-dry-pass-1 — compartilhado entre SQS e SNS, formato
+// ARN estruturalmente idêntico entre os dois serviços).
 
 // extractTagsQuery extrai pares Tag.N.Key/Value do form-encoded SNS.
 func extractTagsQuery(params url.Values) map[string]string {
@@ -828,48 +819,10 @@ func validateJSON(s string, out any) error {
 }
 
 // --- AWSError ---
-
-// AWSError representa um erro SNS com código oficial AWS.
-type AWSError struct {
-	Code    string
-	Message string
-}
-
-// Error implementa error.
-func (e *AWSError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
-}
-
-// IsSenderFault retorna true se o erro é culpa do cliente.
-func (e *AWSError) IsSenderFault() bool {
-	switch e.Code {
-	case ErrCodeTopicAlreadyExists, ErrCodeTopicDoesNotExist,
-		ErrCodeInvalidParameterValue, ErrCodeMissingParameter,
-		ErrCodeInvalidProtocol, ErrCodeSubscriptionDoesNotExist:
-		return true
-	}
-	return false
-}
-
-// AsAWSError converte um erro genérico em *AWSError.
 //
-// storage.ErrTopicNotFound → TopicDoesNotExist.
-// storage.ErrInvalidArgument → InvalidParameterValue.
-// Qualquer outro → InternalError.
-func AsAWSError(err error) *AWSError {
-	if err == nil {
-		return nil
-	}
-	var awsErr *AWSError
-	if errors.As(err, &awsErr) {
-		return awsErr
-	}
-	if errors.Is(err, storage.ErrTopicNotFound) {
-		return &AWSError{Code: ErrCodeTopicDoesNotExist, Message: err.Error()}
-	}
-	var invalidArg storage.ErrInvalidArgumentT
-	if errors.As(err, &invalidArg) {
-		return &AWSError{Code: ErrCodeInvalidParameterValue, Message: err.Error()}
-	}
-	return &AWSError{Code: ErrCodeInternalError, Message: err.Error()}
-}
+// Pré-refactor (refactor/kiss-dry-pass-1): struct AWSError + Error() +
+// IsSenderFault() + AsAWSError() existiam duplicados entre sns/service.go
+// e sqs/service.go (~50 linhas cada). Agora AWSError = alias para
+// awserr.Error; IsSenderFault e AsAWSError delegados ao pacote awserr.
+
+// (Fim)

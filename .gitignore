@@ -76,3 +76,10 @@ secrets/
 # Snapshots NATS
 nats-data/
 jetstream-data/
+
+# Transientes de PR/review (input do `gh pr create --body-file` ou similar).
+# Nunca deveriam ir para o repo — o body vive no GitHub. Para transientes
+# one-shot prefira /tmp/opencode/ fora do repo.
+.github/PR_BODY_*.md
+PR_BODY_*.md
+.claude/PROGRESS.md

@@ -77,7 +77,7 @@ func TestWriteSQSFatalError(t *testing.T) {
 	for _, tc := range tests {
 		var buf bytes.Buffer
 		rec := httptest.NewRecorder()
-		writeSQSFatalError(rec, tc.code, "test message", "req-abc")
+		writeFatalError(rec, transportSQSQuery, tc.code, "test message", "req-abc")
 
 		if rec.Code != tc.status {
 			t.Errorf("%s: status got %d, want %d", tc.code, rec.Code, tc.status)
@@ -99,7 +99,7 @@ func TestWriteSQSFatalError(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	s := New(":0", &Handlers{})
+	s := New(":0", &Handlers{}, 5242880)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	s.healthz(rec, req)
@@ -109,7 +109,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyz_NoStorage(t *testing.T) {
-	s := New(":0", &Handlers{Storage: nil})
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
 	req := httptest.NewRequest("GET", "/readyz", nil)
 	rec := httptest.NewRecorder()
 	s.readyz(rec, req)
@@ -120,7 +120,7 @@ func TestReadyz_NoStorage(t *testing.T) {
 
 // TestRequestIDMiddleware injeta X-Request-ID.
 func TestRequestIDMiddleware(t *testing.T) {
-	s := New(":0", &Handlers{Storage: nil})
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	s.router.ServeHTTP(rec, req)
@@ -136,7 +136,7 @@ func TestRequestIDMiddleware(t *testing.T) {
 // TestRequestIDMiddleware_PreservesIncoming verifica que X-Request-ID
 // do cliente é preservado se enviado.
 func TestRequestIDMiddleware_PreservesIncoming(t *testing.T) {
-	s := New(":0", &Handlers{Storage: nil})
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	req.Header.Set("X-Request-ID", "my-trace-123")
 	rec := httptest.NewRecorder()
@@ -159,7 +159,7 @@ func TestLoggingMiddleware_Success(t *testing.T) {
 		_ = prev
 	}()
 
-	s := New(":0", &Handlers{Storage: nil})
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	s.router.ServeHTTP(rec, req)
@@ -180,7 +180,7 @@ func TestRecoveryMiddleware_Panic(t *testing.T) {
 	cfg.LogLevel = config.LogLevelError
 	observability.SetupLogger(cfg)
 
-	s := New(":0", &Handlers{Storage: nil})
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
 	// Registra rota temporária que panica.
 	s.router.Get("/panic", func(w http.ResponseWriter, r *http.Request) {
 		panic("boom!")
@@ -198,7 +198,7 @@ func TestRecoveryMiddleware_Panic(t *testing.T) {
 
 // TestMetricsEndpoint garante que /metrics responde 200 e tem texto Prometheus.
 func TestMetricsEndpoint(t *testing.T) {
-	s := New(":0", &Handlers{Storage: nil})
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
 	s.router.ServeHTTP(rec, req)
@@ -214,7 +214,7 @@ func TestMetricsEndpoint(t *testing.T) {
 // TestServerLifecycle verifica que ListenAndServe + Shutdown funcionam
 // sem bloquear indefinidamente.
 func TestServerLifecycle(t *testing.T) {
-	s := New("127.0.0.1:0", &Handlers{Storage: nil})
+	s := New("127.0.0.1:0", &Handlers{Storage: nil}, 5242880)
 	// Não chamamos ListenAndServe (que bloquearia). Apenas validamos que
 	// o servidor foi construído corretamente.
 	if s.srv == nil {

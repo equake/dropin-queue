@@ -94,3 +94,68 @@ func TestObserveSNSPublish(t *testing.T) {
 	ObserveSNSPublish("topic-orders", "ok", 5*time.Millisecond)
 	ObserveSNSPublish("topic-orders", "error", 5*time.Millisecond)
 }
+
+// TestStartObserve_OkAndError valida o helper introduzido no Commit 1
+// (refactor/kiss-dry-pass-1) que substitui o pattern `defer Observe` +
+// `Observe` explícito (que causava double-count).
+//
+// Padrão correto: StartObserve guarda start time + op name, Done(&err)
+// lê o *error* no momento do defer e chama ObserveStorage 1× só.
+func TestStartObserve_OkAndError(t *testing.T) {
+	SetupMetrics()
+
+	// Sucesso: err fica nil → métrica "ok".
+	{
+		var err error
+		rec := StartObserve("test_op_ok")
+		rec.Done(&err)
+	}
+
+	// Erro: err != nil → métrica "error".
+	{
+		err := errors.New("boom")
+		rec := StartObserve("test_op_err")
+		rec.Done(&err)
+	}
+}
+
+// TestStartObserve_OnlyOneCall garante que Done chamado 1x resulta em
+// exatamente 1 métrica registrada (o bug pré-fix era chamar Done explícito
+// depois do defer, gerando 2 chamadas).
+func TestStartObserve_OnlyOneCall(t *testing.T) {
+	SetupMetrics()
+
+	// Snapshot antes.
+	before := countStorageOpsFor("only_one_op")
+
+	var err error
+	rec := StartObserve("only_one_op")
+	rec.Done(&err)
+
+	after := countStorageOpsFor("only_one_op")
+
+	if (after - before) != 1 {
+		t.Errorf("Done deveria incrementar contador exatamente 1x, got %d", after-before)
+	}
+}
+
+// countStorageOpsFor conta o total de storage_ops_total para uma op específica.
+func countStorageOpsFor(op string) int {
+	mfs, err := Registry().Gather()
+	if err != nil {
+		return 0
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "shim_storage_ops_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "op" && l.GetValue() == op {
+					return int(m.GetCounter().GetValue())
+				}
+			}
+		}
+	}
+	return 0
+}

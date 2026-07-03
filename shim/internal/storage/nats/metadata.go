@@ -41,23 +41,24 @@ type queueMetadataV1 struct {
 
 // metadataKV gerencia acesso ao bucket JetStream KV de metadados.
 //
-// Lazy initialization: o bucket é criado na primeira chamada a Get/Put.
-// Em cluster mode, o bucket tem replicas=3 para HA.
+// Lazy initialization thread-safe via lazyKVCache. Resolve data race pré-existente
+// (Commit 1 — refactor/kiss-dry-pass-1).
+//
+// Em cluster mode, o bucket tem replicas=3 para HA (Replicas via cfg.Cluster
+// helpers — ver Connect).
 func (c *Client) metadataKV(ctx context.Context) (jetstream.KeyValue, error) {
-	if c.kvCache != nil {
-		return c.kvCache, nil
-	}
-	kv, err := c.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: queueMetadataBucket,
-		// Storage: file (persiste em disco, igual aos streams).
-		// TTL: 0 (sem expiração automática — filas são persistentes).
-		// History: 1 (só valor atual; mudanças sobrescrevem).
+	return c.kvCache.loadKV(ctx, func(ctx context.Context) (jetstream.KeyValue, error) {
+		kv, err := c.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: queueMetadataBucket,
+			// Storage: file (persiste em disco, igual aos streams).
+			// TTL: 0 (sem expiração automática — filas são persistentes).
+			// History: 1 (só valor atual; mudanças sobrescrevem).
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create kv %s: %w", queueMetadataBucket, err)
+		}
+		return kv, nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("create kv %s: %w", queueMetadataBucket, err)
-	}
-	c.kvCache = kv
-	return kv, nil
 }
 
 // saveQueueMetadata persiste metadados da fila no KV bucket.
@@ -142,17 +143,16 @@ func (c *Client) loadQueueMetadata(ctx context.Context, name string) (*queueMeta
 // Carrega metadados do KV bucket. Se existirem, sobrescrevem os defaults.
 // O stream JetStream é a fonte da verdade para CreatedAt e Subjects;
 // os atributos vêm do KV.
-func (c *Client) GetQueue(ctx context.Context, name string) (*types.Queue, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("get_queue", nil, time.Since(start)) }()
+func (c *Client) GetQueue(ctx context.Context, name string) (result *types.Queue, err error) {
+	defer observability.StartObserve("get_queue").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(name)
-	s, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+	streamName := queueStreamName(name)
+	s, serr := c.js.Stream(ctx, streamName)
+	if serr != nil {
+		if errors.Is(serr, jetstream.ErrStreamNotFound) {
 			return nil, storage.ErrQueueNotFound
 		}
-		return nil, fmt.Errorf("get stream: %w", err)
+		return nil, fmt.Errorf("get stream: %w", serr)
 	}
 	c.cacheStream(streamName, s)
 
@@ -166,16 +166,16 @@ func (c *Client) GetQueue(ctx context.Context, name string) (*types.Queue, error
 		FIFO:       strings.HasSuffix(name, ".fifo"),
 	}
 
-	md, err := c.loadQueueMetadata(ctx, name)
-	if err != nil {
-		if errors.Is(err, storage.ErrQueueNotFound) {
+	md, merr := c.loadQueueMetadata(ctx, name)
+	if merr != nil {
+		if errors.Is(merr, storage.ErrQueueNotFound) {
 			// Stream existe mas metadata não — provavelmente fila criada
 			// por versão antiga. Retorna defaults sem erro.
 			observability.L().Warn("queue sem metadata KV — usando defaults",
 				"queue", name)
 			return q, nil
 		}
-		return nil, err
+		return nil, merr
 	}
 	// Sobrescreve atributos com valores persistidos.
 	q.Attributes.VisibilityTimeout = md.Attributes["VisibilityTimeout"]
@@ -199,25 +199,24 @@ func (c *Client) GetQueue(ctx context.Context, name string) (*types.Queue, error
 //   - MessageRetentionPeriod → MaxAge do stream
 //   - VisibilityTimeout, MaximumMessageSize, DelaySeconds,
 //     ReceiveMessageWaitTimeSeconds, ContentBasedDeduplication → KV
-func (c *Client) SetQueueAttributes(ctx context.Context, name string, attrs types.QueueAttributes) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("set_queue_attrs", nil, time.Since(start)) }()
+func (c *Client) SetQueueAttributes(ctx context.Context, name string, attrs types.QueueAttributes) (err error) {
+	defer observability.StartObserve("set_queue_attrs").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(name)
-	s, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+	streamName := queueStreamName(name)
+	s, serr := c.js.Stream(ctx, streamName)
+	if serr != nil {
+		if errors.Is(serr, jetstream.ErrStreamNotFound) {
 			return storage.ErrQueueNotFound
 		}
-		return fmt.Errorf("get stream: %w", err)
+		return fmt.Errorf("get stream: %w", serr)
 	}
 
 	cfg := s.CachedInfo().Config
 	if attrs.MessageRetentionPeriod > 0 {
 		cfg.MaxAge = time.Duration(attrs.MessageRetentionPeriod) * time.Second
 	}
-	if _, err := c.js.UpdateStream(ctx, cfg); err != nil {
-		return fmt.Errorf("update stream: %w", err)
+	if _, uerr := c.js.UpdateStream(ctx, cfg); uerr != nil {
+		return fmt.Errorf("update stream: %w", uerr)
 	}
 	c.invalidateStream(streamName)
 
@@ -226,16 +225,16 @@ func (c *Client) SetQueueAttributes(ctx context.Context, name string, attrs type
 	// config nova no próximo mismatch de AckWait (ensureQueueConsumer).
 	if attrs.VisibilityTimeout > 0 {
 		c.invalidateConsumer(queueConsumerName(name))
-		if _, err := c.ensureQueueConsumer(ctx, s, name, attrs.VisibilityTimeout); err != nil {
+		if _, eerr := c.ensureQueueConsumer(ctx, s, name, attrs.VisibilityTimeout); eerr != nil {
 			observability.L().Warn("falha ao atualizar AckWait do consumer",
-				"queue", name, "err", err.Error())
+				"queue", name, "err", eerr.Error())
 		}
 	}
 
 	// Atualiza metadata KV com todos os atributos (não só o que mudou).
-	q, err := c.GetQueue(ctx, name)
-	if err != nil {
-		return err
+	q, gerr := c.GetQueue(ctx, name)
+	if gerr != nil {
+		return gerr
 	}
 	// Mescla: novos attrs sobrescrevem onde fornecidos (>0); outros mantidos.
 	if attrs.VisibilityTimeout > 0 {

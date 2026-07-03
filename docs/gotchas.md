@@ -21,8 +21,11 @@
    `<ListSubscriptionsResult>` vs `<ListSubscriptionsByTopicResult>`. Hardcoded
    causa boto3 retry infinito.
 
-5. **`isSNSQueryRequest` sniff precisa de 1 MB, não 64 KB.**
-   Publish com body > 64 KB era truncado e reescrito como JSON 1.0 silenciosamente.
+5. **(removido no refactor/kiss-dry-pass-1 — Commit 2).**
+   O sniff 1 MB foi substituído por parse direto do body em
+   `handleAWSQueryDispatch`. Body > cfg.MaxRequestBodyBytes (5 MB
+   default) gera erro coerente antes do dispatch, sem fallback
+   silencioso para SQS. Ver `test_sns_large_publish.py:36`.
 
 ## NATS JetStream
 

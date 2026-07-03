@@ -199,10 +199,10 @@ func TestMessageAttributesSize(t *testing.T) {
 		// 3 (nome) + 6 (Binary) + 4 (bytes) = 13
 		"bin": {DataType: "Binary", BinaryValue: []byte{1, 2, 3, 4}},
 	}
-	if got := messageAttributesSize(attrs); got != 28 {
+	if got := protocol.MessageAttributesSize(attrs); got != 28 {
 		t.Errorf("size: got %d, want 28", got)
 	}
-	if got := messageAttributesSize(nil); got != 0 {
+	if got := protocol.MessageAttributesSize(nil); got != 0 {
 		t.Errorf("nil deve ter size 0, got %d", got)
 	}
 }

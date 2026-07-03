@@ -112,9 +112,8 @@ func messageHeaders(attrs map[string]types.MessageAttribute) (nats.Header, error
 //
 // Idempotência FIFO: Nats-Msg-Id deduplica em janela de 2 minutos (default).
 // Para idempotência Standard, o cliente controla com MessageDeduplicationId.
-func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.Message) (*types.Message, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("send_message", nil, time.Since(start)) }()
+func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.Message) (result *types.Message, err error) {
+	defer observability.StartObserve("send_message").Done(&err)
 
 	if msg == nil {
 		return nil, storage.ErrInvalidArgument("msg é nil")
@@ -123,10 +122,9 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 		return nil, storage.ErrInvalidArgument("body vazio")
 	}
 
-	q, err := c.GetQueue(ctx, queueName)
-	if err != nil {
-		observability.ObserveStorage("send_message", err, time.Since(start))
-		return nil, err
+	q, gerr := c.GetQueue(ctx, queueName)
+	if gerr != nil {
+		return nil, gerr
 	}
 
 	maxSize := int(q.Attributes.MaximumMessageSize)
@@ -134,8 +132,6 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 		maxSize = 262144
 	}
 	if len(msg.Body) > maxSize {
-		observability.ObserveStorage("send_message",
-			fmt.Errorf("body %d bytes > max %d", len(msg.Body), maxSize), time.Since(start))
 		return nil, storage.ErrMessageTooLarge(len(msg.Body), maxSize)
 	}
 
@@ -143,7 +139,6 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 
 	headers, herr := messageHeaders(msg.MessageAttributes)
 	if herr != nil {
-		observability.ObserveStorage("send_message", herr, time.Since(start))
 		return nil, herr
 	}
 
@@ -165,10 +160,9 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 		Data:    []byte(msg.Body),
 		Header:  headers,
 	}
-	ackFuture, err := c.js.PublishMsgAsync(nmsg, publishOpts...)
-	if err != nil {
-		observability.ObserveStorage("send_message", err, time.Since(start))
-		return nil, fmt.Errorf("publish async: %w", err)
+	ackFuture, perr := c.js.PublishMsgAsync(nmsg, publishOpts...)
+	if perr != nil {
+		return nil, fmt.Errorf("publish async: %w", perr)
 	}
 
 	if msg.Attributes == nil {
@@ -177,7 +171,6 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 
 	select {
 	case <-ctx.Done():
-		observability.ObserveStorage("send_message", ctx.Err(), time.Since(start))
 		return nil, ctx.Err()
 	case a := <-ackFuture.Ok():
 		msg.ID = strconv.FormatUint(a.Sequence, 10)
@@ -189,7 +182,6 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 		// DiscardNew: fila cheia rejeita o publish. Erro tipado para a
 		// camada service mapear para OverLimit (cliente faz backoff).
 		if strings.Contains(strings.ToLower(e.Error()), "maximum messages exceeded") {
-			observability.ObserveStorage("send_message", e, time.Since(start))
 			return nil, storage.ErrQueueFull
 		}
 		// FIFO dedup: mensagem duplicada, retornamos sucesso com ID derivado.
@@ -202,7 +194,6 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 			}
 			return msg, nil
 		}
-		observability.ObserveStorage("send_message", e, time.Since(start))
 		return nil, fmt.Errorf("publish ack: %w", e)
 	}
 
@@ -212,7 +203,6 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 	msg.Attributes["SentTimestamp"] = fmt.Sprintf("%d", msg.EnqueuedAt.UnixMilli())
 	msg.Attributes["ApproximateReceiveCount"] = "0"
 
-	observability.ObserveStorage("send_message", nil, time.Since(start))
 	return msg, nil
 }
 
@@ -247,12 +237,10 @@ func (c *Client) ReceiveMessage(
 	maxMessages int32,
 	waitSeconds int32,
 	visibilityTimeout int32,
-) ([]types.Message, error) {
-	start := time.Now()
-	defer func() {
-		observability.ObserveStorage("receive_message", nil, time.Since(start))
-		observability.ObserveLongPollDuration(queueName, time.Since(start))
-	}()
+) (result []types.Message, err error) {
+	rec := observability.StartObserve("receive_message")
+	defer rec.Done(&err)
+	defer func() { observability.ObserveLongPollDuration(queueName, time.Since(rec.Start())) }()
 
 	if maxMessages < 1 {
 		maxMessages = 1
@@ -261,10 +249,9 @@ func (c *Client) ReceiveMessage(
 		maxMessages = 10
 	}
 
-	q, err := c.GetQueue(ctx, queueName)
-	if err != nil {
-		observability.ObserveStorage("receive_message", err, time.Since(start))
-		return nil, err
+	q, gerr := c.GetQueue(ctx, queueName)
+	if gerr != nil {
+		return nil, gerr
 	}
 	if visibilityTimeout <= 0 {
 		visibilityTimeout = q.Attributes.VisibilityTimeout
@@ -282,10 +269,9 @@ func (c *Client) ReceiveMessage(
 	observability.IncLongPoll(queueName)
 	defer observability.DecLongPoll(queueName)
 
-	consumer, err := c.ensureQueueConsumer(ctx, nil, queueName, visibilityTimeout)
-	if err != nil {
-		observability.ObserveStorage("receive_message", err, time.Since(start))
-		return nil, err
+	consumer, cerr := c.ensureQueueConsumer(ctx, nil, queueName, visibilityTimeout)
+	if cerr != nil {
+		return nil, cerr
 	}
 
 	// FetchMaxWait é SEMPRE setado — inclusive no short-poll. Sem ele, o
@@ -299,20 +285,18 @@ func (c *Client) ReceiveMessage(
 		maxWait = time.Duration(waitSeconds) * time.Second
 	}
 	fetchOpts := []jetstream.FetchOpt{jetstream.FetchMaxWait(maxWait)}
-	mset, err := consumer.Fetch(int(maxMessages), fetchOpts...)
-	if err != nil {
+	mset, ferr := consumer.Fetch(int(maxMessages), fetchOpts...)
+	if ferr != nil {
 		// Handle cacheado pode estar stale (fila deletada/recriada por
 		// outra réplica). Invalida e tenta uma vez com consumer fresco.
 		c.invalidateConsumer(queueConsumerName(queueName))
-		consumer, err = c.ensureQueueConsumer(ctx, nil, queueName, visibilityTimeout)
-		if err != nil {
-			observability.ObserveStorage("receive_message", err, time.Since(start))
-			return nil, err
+		consumer, cerr = c.ensureQueueConsumer(ctx, nil, queueName, visibilityTimeout)
+		if cerr != nil {
+			return nil, cerr
 		}
-		mset, err = consumer.Fetch(int(maxMessages), fetchOpts...)
-		if err != nil {
-			observability.ObserveStorage("receive_message", err, time.Since(start))
-			return nil, fmt.Errorf("fetch: %w", err)
+		mset, ferr = consumer.Fetch(int(maxMessages), fetchOpts...)
+		if ferr != nil {
+			return nil, fmt.Errorf("fetch: %w", ferr)
 		}
 	}
 
@@ -326,9 +310,9 @@ func (c *Client) ReceiveMessage(
 			return out, nil
 		case msg, ok := <-mset.Messages():
 			if !ok {
-				if err := mset.Error(); err != nil && len(out) == 0 &&
-					!errors.Is(err, nats.ErrTimeout) {
-					return nil, fmt.Errorf("fetch error: %w", err)
+				if merr := mset.Error(); merr != nil && len(out) == 0 &&
+					!errors.Is(merr, nats.ErrTimeout) {
+					return nil, fmt.Errorf("fetch error: %w", merr)
 				}
 				return out, nil
 			}
@@ -377,7 +361,7 @@ func (c *Client) ensureQueueConsumer(
 	}
 
 	if stream == nil {
-		streamName := "queue-" + sanitizeStreamName(queueName)
+		streamName := queueStreamName(queueName)
 		s, err := c.js.Stream(ctx, streamName)
 		if err != nil {
 			if errors.Is(err, jetstream.ErrStreamNotFound) {
@@ -529,7 +513,7 @@ func validateReceiptQueue(replySubject, queueName string) error {
 	default:
 		return storage.ErrInvalidReceiptHandle("reply subject com formato desconhecido")
 	}
-	expected := "queue-" + sanitizeStreamName(queueName)
+	expected := queueStreamName(queueName)
 	if stream != expected {
 		return storage.ErrInvalidReceiptHandle(
 			fmt.Sprintf("receipt handle pertence a outra fila (%s)", stream))
@@ -567,27 +551,20 @@ func (c *Client) publishAck(ctx context.Context, replySubject string, payload []
 //   - Idempotente: deletar duas vezes é OK.
 //   - Se visibility timeout expirou: ReceiptHandleIsInvalid.
 //   - Se fila não existe: QueueDoesNotExist.
-func (c *Client) DeleteMessage(ctx context.Context, queueName string, receiptHandle string) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("delete_message", nil, time.Since(start)) }()
+func (c *Client) DeleteMessage(ctx context.Context, queueName string, receiptHandle string) (err error) {
+	defer observability.StartObserve("delete_message").Done(&err)
 
 	if receiptHandle == "" {
 		return storage.ErrInvalidArgument("receipt handle vazio")
 	}
-	reply, err := decodeReceiptHandle(receiptHandle)
-	if err != nil {
-		return storage.ErrInvalidReceiptHandle(err.Error())
+	reply, derr := decodeReceiptHandle(receiptHandle)
+	if derr != nil {
+		return storage.ErrInvalidReceiptHandle(derr.Error())
 	}
-	if err := validateReceiptQueue(reply, queueName); err != nil {
-		return err
+	if verr := validateReceiptQueue(reply, queueName); verr != nil {
+		return verr
 	}
-
-	if err := c.publishAck(ctx, reply, []byte("+ACK")); err != nil {
-		observability.ObserveStorage("delete_message", err, time.Since(start))
-		return err
-	}
-	observability.ObserveStorage("delete_message", nil, time.Since(start))
-	return nil
+	return c.publishAck(ctx, reply, []byte("+ACK"))
 }
 
 // ChangeMessageVisibility redefine o tempo de visibilidade de uma mensagem.
@@ -602,9 +579,8 @@ func (c *Client) ChangeMessageVisibility(
 	queueName string,
 	receiptHandle string,
 	visibilityTimeout int32,
-) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("change_visibility", nil, time.Since(start)) }()
+) (err error) {
+	defer observability.StartObserve("change_visibility").Done(&err)
 
 	if receiptHandle == "" {
 		return storage.ErrInvalidArgument("receipt handle vazio")
@@ -612,12 +588,12 @@ func (c *Client) ChangeMessageVisibility(
 	if visibilityTimeout < 0 || visibilityTimeout > 43200 {
 		return storage.ErrInvalidArgument("visibilityTimeout fora do range [0, 43200]")
 	}
-	reply, err := decodeReceiptHandle(receiptHandle)
-	if err != nil {
-		return storage.ErrInvalidReceiptHandle(err.Error())
+	reply, derr := decodeReceiptHandle(receiptHandle)
+	if derr != nil {
+		return storage.ErrInvalidReceiptHandle(derr.Error())
 	}
-	if err := validateReceiptQueue(reply, queueName); err != nil {
-		return err
+	if verr := validateReceiptQueue(reply, queueName); verr != nil {
+		return verr
 	}
 
 	// "-NAK {\"delay\": ns}" é o payload wire que NakWithDelay usa —
@@ -628,12 +604,7 @@ func (c *Client) ChangeMessageVisibility(
 		payload = []byte(fmt.Sprintf(`-NAK {"delay": %d}`,
 			(time.Duration(visibilityTimeout) * time.Second).Nanoseconds()))
 	}
-	if err := c.publishAck(ctx, reply, payload); err != nil {
-		observability.ObserveStorage("change_visibility", err, time.Since(start))
-		return err
-	}
-	observability.ObserveStorage("change_visibility", nil, time.Since(start))
-	return nil
+	return c.publishAck(ctx, reply, payload)
 }
 
 // QueueDepth devolve o número aproximado de mensagens disponíveis.
@@ -641,22 +612,21 @@ func (c *Client) ChangeMessageVisibility(
 // Lê StreamInfo.State.Msgs. Com WorkQueuePolicy, mensagens acked são
 // removidas do stream — State.Msgs conta apenas não-consumidas (visíveis
 // + in-flight), próximo do ApproximateNumberOfMessages do SQS.
-func (c *Client) QueueDepth(ctx context.Context, queueName string) (int64, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("queue_depth", nil, time.Since(start)) }()
+func (c *Client) QueueDepth(ctx context.Context, queueName string) (result int64, err error) {
+	defer observability.StartObserve("queue_depth").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(queueName)
-	stream, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+	streamName := queueStreamName(queueName)
+	stream, serr := c.js.Stream(ctx, streamName)
+	if serr != nil {
+		if errors.Is(serr, jetstream.ErrStreamNotFound) {
 			return 0, storage.ErrQueueNotFound
 		}
-		return 0, fmt.Errorf("get stream: %w", err)
+		return 0, fmt.Errorf("get stream: %w", serr)
 	}
 
-	info, err := stream.Info(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("stream info: %w", err)
+	info, ierr := stream.Info(ctx)
+	if ierr != nil {
+		return 0, fmt.Errorf("stream info: %w", ierr)
 	}
 
 	depth := int64(info.State.Msgs)
