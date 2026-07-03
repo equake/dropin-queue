@@ -78,7 +78,19 @@ Stack:
 - [ ] Commit em português, mensagem detalhada descrevendo o **porquê** (não só o quê)
 - [ ] `git push origin main` e atualize descrição do repo se a feature mudar o escopo
 
-## 5. Convenções de instrumentação (refactor/kiss-dry-pass-1)
+## 5. Atribuição de commits
+
+**Regra:** cada committer é responsável pela **sua própria** atribuição.
+Não usar `Co-Authored-By:` creditando outra pessoa/agente que não
+participou da escrita daquele diff específico.
+
+Caso histórico (não repetir): o assistente opencode/minimax-m3
+copiou footers `Co-Authored-By: Claude Fable <noreply@anthropic.com>`
+vistos em commits antigos do repo. Resultou em 9 commits com atribuição
+falsa (audit claim errada em git history). O humano autorizou deixar
+esses 9 commits sem reescrever histórico; futuros commits são limpos.
+
+## 6. Convenções de instrumentação (refactor/kiss-dry-pass-1)
 
 - **Métricas de storage**: usar SEMPRE `observability.StartObserve(op).Done(&err)`
   em método com named return + `defer`. Chamada explícita de
