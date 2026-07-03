@@ -15,9 +15,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
-	"github.com/anomalyco/generic_queue/shim/internal/storage"
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/storage"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 // topicMetadataBucket é o nome do KV bucket que armazena metadados dos tópicos.
@@ -378,6 +378,12 @@ func (c *Client) listAllSubscriptions(ctx context.Context) ([]types.Subscription
 	}
 	keys, err := kv.Keys(ctx)
 	if err != nil {
+		// NATS KV retorna ErrNoKeysFound quando o bucket está vazio;
+		// nesse caso retornamos uma lista vazia em vez de propagar erro.
+		// (NOTA: o erro vem do pacote jetstream, não do pacote nats)
+		if errors.Is(err, jetstream.ErrNoKeysFound) || err == jetstream.ErrNoKeysFound {
+			return []types.Subscription{}, nil
+		}
 		return nil, fmt.Errorf("list keys: %w", err)
 	}
 	out := make([]types.Subscription, 0, len(keys))
