@@ -74,6 +74,12 @@ func New(s storage.Storage, accountID, region, endpointURL string) *Service {
 	}
 }
 
+// Region retorna a região configurada (usada pelos handlers HTTP para construir ARNs).
+func (s *Service) Region() string { return s.region }
+
+// AccountID retorna o account ID configurado.
+func (s *Service) AccountID() string { return s.accountID }
+
 // --- CreateTopic ---
 
 // CreateTopicParams contém os parâmetros de CreateTopic.
@@ -392,14 +398,50 @@ func (s *Service) Subscribe(ctx context.Context, params *SubscribeParams) (*Subs
 }
 
 // SubscribeParamsFromQuery normaliza Query → SubscribeParams.
+//
+// Em Query, atributos de subscription (FilterPolicy, RawDelivery) chegam via
+// Attributes.N.Name/Value (formato herdado de SQS SetQueueAttributes) ou
+// via Attributes.entry.N.key/Attributes.entry.N.value (formato que boto3
+// utiliza para SNS). Suportamos ambos, além de FilterPolicy como parâmetro
+// top-level para clientes que enviam desta forma.
 func SubscribeParamsFromQuery(params url.Values) *SubscribeParams {
-	return &SubscribeParams{
+	p := &SubscribeParams{
 		TopicARN:             params.Get("TopicArn"),
 		Protocol:             params.Get("Protocol"),
 		Endpoint:             params.Get("Endpoint"),
-		FilterPolicy:         params.Get("FilterPolicy"),
 		ReturnSubscriptionARN: params.Get("ReturnSubscriptionArn") == "true",
 	}
+	// FilterPolicy pode vir:
+	//   1. Top-level: FilterPolicy=...
+	//   2. Attributes.N.Name=FilterPolicy & Attributes.N.Value=... (formato AWS legado)
+	//   3. Attributes.entry.N.key=FilterPolicy & Attributes.entry.N.value=... (boto3)
+	if fp := params.Get("FilterPolicy"); fp != "" {
+		p.FilterPolicy = fp
+	} else {
+		// (2) Attributes.N.Name / Attributes.N.Value
+		for k, v := range params {
+			if strings.HasPrefix(k, "Attributes.") && strings.HasSuffix(k, ".Name") && len(v) > 0 && v[0] == "FilterPolicy" {
+				idx := k[len("Attributes.") : len(k)-len(".Name")]
+				valKey := "Attributes." + idx + ".Value"
+				if val, ok := params[valKey]; ok && len(val) > 0 {
+					p.FilterPolicy = val[0]
+				}
+			}
+		}
+		// (3) Attributes.entry.N.key / Attributes.entry.N.value
+		if p.FilterPolicy == "" {
+			for k, v := range params {
+				if strings.HasPrefix(k, "Attributes.entry.") && strings.HasSuffix(k, ".key") && len(v) > 0 && v[0] == "FilterPolicy" {
+					idx := k[len("Attributes.entry.") : len(k)-len(".key")]
+					valKey := "Attributes.entry." + idx + ".value"
+					if val, ok := params[valKey]; ok && len(val) > 0 {
+						p.FilterPolicy = val[0]
+					}
+				}
+			}
+		}
+	}
+	return p
 }
 
 // SubscribeParamsFromJSON normaliza JSON → SubscribeParams.
@@ -414,8 +456,14 @@ func SubscribeParamsFromJSON(params map[string]any) *SubscribeParams {
 	if s, ok := params["Endpoint"].(string); ok {
 		p.Endpoint = s
 	}
+	// FilterPolicy pode vir como parâmetro top-level (Query herdado) ou dentro
+	// de Attributes (JSON 1.0 — boto3 envia assim).
 	if s, ok := params["FilterPolicy"].(string); ok {
 		p.FilterPolicy = s
+	} else if attrs, ok := params["Attributes"].(map[string]any); ok {
+		if s, ok := attrs["FilterPolicy"].(string); ok {
+			p.FilterPolicy = s
+		}
 	}
 	if f, ok := params["ReturnSubscriptionArn"].(bool); ok {
 		p.ReturnSubscriptionARN = f

@@ -38,6 +38,7 @@ import (
 	"github.com/anomalyco/generic_queue/shim/internal/config"
 	"github.com/anomalyco/generic_queue/shim/internal/observability"
 	"github.com/anomalyco/generic_queue/shim/internal/server"
+	"github.com/anomalyco/generic_queue/shim/internal/sns"
 	"github.com/anomalyco/generic_queue/shim/internal/sqs"
 	natsstorage "github.com/anomalyco/generic_queue/shim/internal/storage/nats"
 )
@@ -104,11 +105,13 @@ func run() error {
 
 	// 6. Services
 	sqsService := sqs.New(storage, cfg.AccountID, cfg.Region, endpointFromAddr(cfg.Addr))
+	snsService := sns.New(storage, cfg.AccountID, cfg.Region, endpointFromAddr(cfg.Addr))
 
 	// 7. HTTP server
 	srv := server.New(cfg.Addr, &server.Handlers{
 		Storage: storage,
 		SQS:     sqsService,
+		SNS:     snsService,
 	})
 
 	// 8. Lifecycle: rodando em goroutine, escuta sinais de shutdown.
