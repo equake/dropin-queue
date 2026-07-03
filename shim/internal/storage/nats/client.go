@@ -34,9 +34,34 @@ const (
 	// "t.<topicName>".
 	topicSubjectPrefix = "t."
 
-	// consumerPrefix é o nome usado para consumers duráveis.
-	// "shim-consumer-<queueName>" para queues, "shim-sub-<topic>-<endpoint>" para subscribers.
+	// queueStreamPrefix é o prefixo para nomes de stream JetStream de filas.
+	// ATENÇÃO: mudar este formato invalida TODAS as filas existentes
+	// em disco — o nome do stream é o índice primário no broker. O comentário
+	// em queueConsumerName (messages.go) já avisa sobre o mesmo risco
+	// para nomes de consumer; aqui estende ao nome do stream.
+	queueStreamPrefix = "queue-"
+
+	// topicStreamPrefix é o prefixo para nomes de stream JetStream de
+	// tópicos SNS. Mesmo cuidado de migration: rename = data loss.
+	topicStreamPrefix = "topic-"
 )
+
+// queueStreamName retorna o nome do stream JetStream de uma fila.
+//
+// Refactor/kiss-dry-pass-1 — antes era "queue-"+sanitizeStreamName(name)
+// espalhado em 8 sites (queues.go, metadata.go, messages.go). Centralizado
+// aqui para que futuras mudanças de formato sejam atômicas.
+func queueStreamName(queueName string) string {
+	return queueStreamPrefix + sanitizeStreamName(queueName)
+}
+
+// topicStreamName retorna o nome do stream JetStream de um tópico SNS.
+//
+// Mesmo padrão de queueStreamName; antes era "topic-"+sanitizeStreamName(name)
+// em 3 sites (topics.go).
+func topicStreamName(topicName string) string {
+	return topicStreamPrefix + sanitizeStreamName(topicName)
+}
 
 // Client encapsula a conexão com NATS JetStream e expõe a interface Storage.
 //

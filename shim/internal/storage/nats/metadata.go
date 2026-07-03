@@ -146,7 +146,7 @@ func (c *Client) loadQueueMetadata(ctx context.Context, name string) (*queueMeta
 func (c *Client) GetQueue(ctx context.Context, name string) (result *types.Queue, err error) {
 	defer observability.StartObserve("get_queue").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(name)
+	streamName := queueStreamName(name)
 	s, serr := c.js.Stream(ctx, streamName)
 	if serr != nil {
 		if errors.Is(serr, jetstream.ErrStreamNotFound) {
@@ -202,7 +202,7 @@ func (c *Client) GetQueue(ctx context.Context, name string) (result *types.Queue
 func (c *Client) SetQueueAttributes(ctx context.Context, name string, attrs types.QueueAttributes) (err error) {
 	defer observability.StartObserve("set_queue_attrs").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(name)
+	streamName := queueStreamName(name)
 	s, serr := c.js.Stream(ctx, streamName)
 	if serr != nil {
 		if errors.Is(serr, jetstream.ErrStreamNotFound) {

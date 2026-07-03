@@ -42,7 +42,7 @@ const defaultMaxMsgsPerQueue = 10_000_000
 // recriados para adotar WorkQueuePolicy.
 func (c *Client) streamCfg(q types.Queue) jetstream.StreamConfig {
 	cfg := jetstream.StreamConfig{
-		Name:      "queue-" + sanitizeStreamName(q.Name),
+		Name:      queueStreamName(q.Name),
 		Subjects:  []string{c.queueSubject(q.Name) + ".>"},
 		Storage:   jetstream.FileStorage,
 		Discard:   jetstream.DiscardNew,
@@ -187,7 +187,7 @@ func (c *Client) ListQueues(ctx context.Context, prefix string) (result []types.
 func (c *Client) DeleteQueue(ctx context.Context, name string) (err error) {
 	defer observability.StartObserve("delete_queue").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(name)
+	streamName := queueStreamName(name)
 	derr := c.js.DeleteStream(ctx, streamName)
 	c.invalidateStream(streamName)
 	c.invalidateConsumer(queueConsumerName(name))
@@ -202,7 +202,7 @@ func (c *Client) DeleteQueue(ctx context.Context, name string) (err error) {
 func (c *Client) PurgeQueue(ctx context.Context, name string) (err error) {
 	defer observability.StartObserve("purge_queue").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(name)
+	streamName := queueStreamName(name)
 	s, serr := c.js.Stream(ctx, streamName)
 	if serr != nil {
 		if errors.Is(serr, jetstream.ErrStreamNotFound) {

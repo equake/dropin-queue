@@ -197,7 +197,7 @@ func (s *Service) GetTopicAttributes(ctx context.Context, params *GetTopicAttrib
 		}
 	}
 
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -291,7 +291,7 @@ func (s *Service) DeleteTopic(ctx context.Context, params *DeleteTopicParams) er
 			Message: "TopicArn é obrigatório",
 		}
 	}
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -570,7 +570,7 @@ func (s *Service) ListSubscriptionsByTopic(ctx context.Context, params *ListSubs
 			Message: "TopicArn é obrigatório",
 		}
 	}
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -648,7 +648,7 @@ func (s *Service) Publish(ctx context.Context, params *PublishParams) (*PublishR
 		}
 	}
 
-	topicName := extractTopicName(params.TopicARN)
+	topicName := protocol.ResourceNameFromARN(params.TopicARN)
 	if topicName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
@@ -749,16 +749,9 @@ func ConfirmSubscriptionParamsFromJSON(params map[string]any) *ConfirmSubscripti
 
 // --- helpers ---
 
-// extractTopicName extrai o nome do tópico de um ARN SNS.
-//
-// Formato: arn:aws:sns:<region>:<account>:<name>
-func extractTopicName(arn string) string {
-	parts := strings.Split(arn, ":")
-	if len(parts) < 6 {
-		return ""
-	}
-	return parts[5]
-}
+// extractTopicName movido para protocol.ResourceNameFromARN
+// (refactor/kiss-dry-pass-1 — compartilhado entre SQS e SNS, formato
+// ARN estruturalmente idêntico entre os dois serviços).
 
 // extractTagsQuery extrai pares Tag.N.Key/Value do form-encoded SNS.
 func extractTagsQuery(params url.Values) map[string]string {

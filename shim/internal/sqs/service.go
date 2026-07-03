@@ -398,7 +398,7 @@ func GetQueueAttributesParamsFromJSON(params map[string]any) *GetQueueAttributes
 	if s, ok := params["QueueName"].(string); ok && s != "" {
 		p.QueueName = s
 	} else if s, ok := params["QueueUrl"].(string); ok && s != "" {
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if raw, ok := params["AttributeName"]; ok {
 		if arr, ok := raw.([]any); ok {
@@ -492,17 +492,8 @@ func (s *Service) DeleteQueue(ctx context.Context, params *DeleteQueueParams) er
 	return s.storage.Queues().DeleteQueue(ctx, params.QueueName)
 }
 
-// queueNameFromURL extrai o nome da fila da QueueURL.
-//
-// Formato: http(s)://endpoint/<account>/<name>
-// Nome é o último segmento do path.
-func queueNameFromURL(queueURL string) string {
-	idx := strings.LastIndex(queueURL, "/")
-	if idx < 0 || idx == len(queueURL)-1 {
-		return queueURL
-	}
-	return queueURL[idx+1:]
-}
+// queueNameFromURL movido para protocol/QueueNameFromURL
+// (refactor/kiss-dry-pass-1 — compartilhado com storage/nats e SNS).
 
 // --- SendMessageBatch ---
 
@@ -617,7 +608,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 	}
 
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -753,7 +744,7 @@ func SendMessageBatchParamsFromQuery(params url.Values) *SendMessageBatchParams 
 		QueueName: params.Get("QueueName"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 
 	entries := protocol.ExtractQuerySendMessageBatchEntries(params)
@@ -776,7 +767,7 @@ func SendMessageBatchParamsFromJSON(params map[string]any) *SendMessageBatchPara
 	p := &SendMessageBatchParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -831,7 +822,7 @@ func (s *Service) DeleteMessageBatch(ctx context.Context, params *DeleteMessageB
 	}
 
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -903,7 +894,7 @@ func DeleteMessageBatchParamsFromQuery(params url.Values) *DeleteMessageBatchPar
 		QueueName: params.Get("QueueName"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 
 	entries := protocol.ExtractQueryDeleteMessageBatchEntries(params)
@@ -923,7 +914,7 @@ func DeleteMessageBatchParamsFromJSON(params map[string]any) *DeleteMessageBatch
 	p := &DeleteMessageBatchParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -979,7 +970,7 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 
 	// Resolve QueueName.
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -1076,7 +1067,7 @@ func SendMessageParamsFromQuery(params url.Values) *SendMessageParams {
 		MessageDeduplicationId: params.Get("MessageDeduplicationId"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1086,7 +1077,7 @@ func SendMessageParamsFromJSON(params map[string]any) *SendMessageParams {
 	p := &SendMessageParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1148,7 +1139,7 @@ func (s *Service) ReceiveMessage(ctx context.Context, params *ReceiveMessagePara
 
 	// Resolve QueueName.
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return nil, &AWSError{
@@ -1247,7 +1238,7 @@ func ReceiveMessageParamsFromQuery(params url.Values) *ReceiveMessageParams {
 		ReceiveRequestAttemptId: params.Get("ReceiveRequestAttemptId"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 
 	// AttributeName.N e MessageAttributeName.N
@@ -1275,7 +1266,7 @@ func ReceiveMessageParamsFromJSON(params map[string]any) *ReceiveMessageParams {
 	p := &ReceiveMessageParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1339,7 +1330,7 @@ func (s *Service) DeleteMessage(ctx context.Context, params *DeleteMessageParams
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1358,7 +1349,7 @@ func DeleteMessageParamsFromQuery(params url.Values) *DeleteMessageParams {
 		ReceiptHandle: params.Get("ReceiptHandle"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1368,7 +1359,7 @@ func DeleteMessageParamsFromJSON(params map[string]any) *DeleteMessageParams {
 	p := &DeleteMessageParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1404,7 +1395,7 @@ func (s *Service) ChangeMessageVisibility(ctx context.Context, params *ChangeMes
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1424,7 +1415,7 @@ func ChangeMessageVisibilityParamsFromQuery(params url.Values) *ChangeMessageVis
 		VisibilityTimeout: parseInt32Default(params.Get("VisibilityTimeout"), 0),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1434,7 +1425,7 @@ func ChangeMessageVisibilityParamsFromJSON(params map[string]any) *ChangeMessage
 	p := &ChangeMessageVisibilityParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1469,7 +1460,7 @@ func (s *Service) PurgeQueue(ctx context.Context, params *PurgeQueueParams) erro
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1487,7 +1478,7 @@ func PurgeQueueParamsFromQuery(params url.Values) *PurgeQueueParams {
 		QueueURL:  params.Get("QueueUrl"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1497,7 +1488,7 @@ func PurgeQueueParamsFromJSON(params map[string]any) *PurgeQueueParams {
 	p := &PurgeQueueParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1523,7 +1514,7 @@ func (s *Service) SetQueueAttributes(ctx context.Context, params *SetQueueAttrib
 		}
 	}
 	if params.QueueName == "" && params.QueueURL != "" {
-		params.QueueName = queueNameFromURL(params.QueueURL)
+		params.QueueName = protocol.QueueNameFromURL(params.QueueURL)
 	}
 	if params.QueueName == "" {
 		return &AWSError{
@@ -1554,7 +1545,7 @@ func SetQueueAttributesParamsFromQuery(params url.Values) *SetQueueAttributesPar
 		Attributes: extractAttributes(params, "Attribute"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
-		p.QueueName = queueNameFromURL(p.QueueURL)
+		p.QueueName = protocol.QueueNameFromURL(p.QueueURL)
 	}
 	return p
 }
@@ -1564,7 +1555,7 @@ func SetQueueAttributesParamsFromJSON(params map[string]any) *SetQueueAttributes
 	p := &SetQueueAttributesParams{}
 	if s, ok := params["QueueUrl"].(string); ok {
 		p.QueueURL = s
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	if s, ok := params["QueueName"].(string); ok {
 		p.QueueName = s
@@ -1578,7 +1569,7 @@ func SetQueueAttributesParamsFromJSON(params map[string]any) *SetQueueAttributes
 func DeleteQueueParamsFromQuery(params url.Values) *DeleteQueueParams {
 	name := params.Get("QueueName")
 	if name == "" {
-		name = queueNameFromURL(params.Get("QueueUrl"))
+		name = protocol.QueueNameFromURL(params.Get("QueueUrl"))
 	}
 	return &DeleteQueueParams{QueueName: name}
 }
@@ -1589,7 +1580,7 @@ func DeleteQueueParamsFromJSON(params map[string]any) *DeleteQueueParams {
 	if s, ok := params["QueueName"].(string); ok && s != "" {
 		p.QueueName = s
 	} else if s, ok := params["QueueUrl"].(string); ok && s != "" {
-		p.QueueName = queueNameFromURL(s)
+		p.QueueName = protocol.QueueNameFromURL(s)
 	}
 	return p
 }

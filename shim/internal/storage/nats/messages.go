@@ -361,7 +361,7 @@ func (c *Client) ensureQueueConsumer(
 	}
 
 	if stream == nil {
-		streamName := "queue-" + sanitizeStreamName(queueName)
+		streamName := queueStreamName(queueName)
 		s, err := c.js.Stream(ctx, streamName)
 		if err != nil {
 			if errors.Is(err, jetstream.ErrStreamNotFound) {
@@ -513,7 +513,7 @@ func validateReceiptQueue(replySubject, queueName string) error {
 	default:
 		return storage.ErrInvalidReceiptHandle("reply subject com formato desconhecido")
 	}
-	expected := "queue-" + sanitizeStreamName(queueName)
+	expected := queueStreamName(queueName)
 	if stream != expected {
 		return storage.ErrInvalidReceiptHandle(
 			fmt.Sprintf("receipt handle pertence a outra fila (%s)", stream))
@@ -615,7 +615,7 @@ func (c *Client) ChangeMessageVisibility(
 func (c *Client) QueueDepth(ctx context.Context, queueName string) (result int64, err error) {
 	defer observability.StartObserve("queue_depth").Done(&err)
 
-	streamName := "queue-" + sanitizeStreamName(queueName)
+	streamName := queueStreamName(queueName)
 	stream, serr := c.js.Stream(ctx, streamName)
 	if serr != nil {
 		if errors.Is(serr, jetstream.ErrStreamNotFound) {

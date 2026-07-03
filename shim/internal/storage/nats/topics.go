@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/protocol"
 	"github.com/equake/dropin-queue/shim/internal/storage"
 	"github.com/equake/dropin-queue/shim/pkg/types"
 )
@@ -130,7 +131,7 @@ func (c *Client) loadTopicMetadata(ctx context.Context, name string) (*topicMeta
 // de disco puro sem benefício.
 func (c *Client) topicStreamCfg(t types.Topic) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
-		Name:      "topic-" + sanitizeStreamName(t.Name),
+		Name:      topicStreamName(t.Name),
 		Subjects:  []string{c.topicSubject(t.Name)},
 		Storage:   jetstream.FileStorage,
 		Discard:   jetstream.DiscardOld, // registro: descartar antigas é OK aqui
@@ -190,7 +191,7 @@ func (c *Client) CreateTopic(ctx context.Context, t types.Topic) (result *types.
 func (c *Client) GetTopic(ctx context.Context, name string) (result *types.Topic, err error) {
 	defer observability.StartObserve("get_topic").Done(&err)
 
-	streamName := "topic-" + sanitizeStreamName(name)
+	streamName := topicStreamName(name)
 	s, serr := c.js.Stream(ctx, streamName)
 	if serr != nil {
 		if errors.Is(serr, jetstream.ErrStreamNotFound) {
@@ -245,7 +246,7 @@ func (c *Client) ListTopics(ctx context.Context, prefix string) (result []types.
 func (c *Client) DeleteTopic(ctx context.Context, name string) (err error) {
 	defer observability.StartObserve("delete_topic").Done(&err)
 
-	streamName := "topic-" + sanitizeStreamName(name)
+	streamName := topicStreamName(name)
 	derr := c.js.DeleteStream(ctx, streamName)
 	c.invalidateStream(streamName)
 	if derr != nil && !errors.Is(derr, jetstream.ErrStreamNotFound) {
@@ -262,7 +263,7 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) (err error) {
 	subs, lerr := c.listAllSubscriptions(ctx)
 	if lerr == nil {
 		for _, s := range subs {
-			if extractTopicName(s.TopicARN) == name {
+			if protocol.ResourceNameFromARN(s.TopicARN) == name {
 				skv, skerr := c.subscriptionKV(ctx)
 				if skerr == nil {
 					_ = skv.Delete(ctx, subscriptionKey(s.ARN))
@@ -289,7 +290,7 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (result 
 	}
 
 	// Verifica que tópico existe.
-	if _, gerr := c.GetTopic(ctx, extractTopicName(sub.TopicARN)); gerr != nil {
+	if _, gerr := c.GetTopic(ctx, protocol.ResourceNameFromARN(sub.TopicARN)); gerr != nil {
 		return nil, gerr
 	}
 
@@ -313,7 +314,7 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (result 
 		Version:      1,
 		ARN:          sub.ARN,
 		TopicARN:     sub.TopicARN,
-		TopicName:    extractTopicName(sub.TopicARN),
+		TopicName:    protocol.ResourceNameFromARN(sub.TopicARN),
 		Protocol:     sub.Protocol,
 		Endpoint:     sub.Endpoint,
 		FilterPolicy: sub.FilterPolicy,
@@ -351,7 +352,7 @@ func (c *Client) ListSubscriptions(ctx context.Context, topicName string) (resul
 	}
 	out := make([]types.Subscription, 0, len(all))
 	for _, s := range all {
-		if extractTopicName(s.TopicARN) == topicName {
+		if protocol.ResourceNameFromARN(s.TopicARN) == topicName {
 			out = append(out, s)
 		}
 	}
@@ -539,7 +540,7 @@ func (c *Client) deliverToSubscription(ctx context.Context, topic *types.Topic, 
 	switch sub.Protocol {
 	case "sqs":
 		// SQS endpoint é "arn:aws:sqs:..." ou "http(s)://..."
-		queueName := extractQueueNameFromEndpoint(sub.Endpoint)
+		queueName := protocol.QueueNameFromURL(sub.Endpoint)
 		if queueName == "" {
 			observability.L().Warn("SQS subscription com endpoint inválido", "endpoint", sub.Endpoint)
 			return
@@ -620,36 +621,8 @@ func subscriptionKey(arn string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(arn, ":", "_"), ".", "_")
 }
 
-// extractTopicName extrai o nome do tópico de um ARN SNS.
-//
-// Formato ARN: arn:aws:sns:<region>:<account>:<name>
-func extractTopicName(arn string) string {
-	parts := strings.Split(arn, ":")
-	if len(parts) < 6 {
-		return ""
-	}
-	return parts[5]
-}
+// extractTopicName e extractQueueNameFromEndpoint foram para protocol/.
+// ResourceNameFromARN (que cobre queue E topic pelo formato idêntico)
+// e QueueNameFromURL (que cobre ARN OU URL) — refactor/kiss-dry-pass-1.
 
-// extractQueueNameFromEndpoint extrai o nome da fila de um SQS endpoint.
-//
-// Endpoint pode ser:
-//
-//   - arn:aws:sqs:<region>:<account>:<name>
-//   - https://sqs.<region>.amazonaws.com/<account>/<name>
-//   - http://localhost:4566/<account>/<name>
-func extractQueueNameFromEndpoint(endpoint string) string {
-	if strings.HasPrefix(endpoint, "arn:") {
-		parts := strings.Split(endpoint, ":")
-		if len(parts) >= 6 {
-			return parts[5]
-		}
-		return ""
-	}
-	// URL — extrai último segmento do path.
-	idx := strings.LastIndex(endpoint, "/")
-	if idx < 0 || idx == len(endpoint)-1 {
-		return ""
-	}
-	return endpoint[idx+1:]
-}
+// (Fim)
