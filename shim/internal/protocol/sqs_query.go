@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -321,4 +322,138 @@ func ExtractQuerySystemAttributes(params url.Values) map[string]string {
 		}
 	}
 	return out
+}
+
+// QuerySendMessageBatchEntry representa uma entry do SendMessageBatch em Query.
+//
+// Formato AWS:
+//
+//	SendMessageBatchRequestEntry.1.Id=foo
+//	SendMessageBatchRequestEntry.1.MessageBody=bar
+//	SendMessageBatchRequestEntry.1.DelaySeconds=0
+//	SendMessageBatchRequestEntry.1.MessageGroupId=g1
+//	SendMessageBatchRequestEntry.1.MessageDeduplicationId=d1
+//	SendMessageBatchRequestEntry.1.MessageAttribute.1.Name=...
+//	SendMessageBatchRequestEntry.1.MessageAttribute.1.DataType=...
+//	SendMessageBatchRequestEntry.1.MessageAttribute.1.StringValue=...
+type QuerySendMessageBatchEntry struct {
+	Id                   string
+	MessageBody          string
+	DelaySeconds         int32
+	MessageGroupId       string
+	MessageDeduplicationId string
+	MessageAttributes    map[string]MessageAttributeValue
+}
+
+// QueryDeleteMessageBatchEntry representa uma entry do DeleteMessageBatch em Query.
+//
+// Formato AWS:
+//
+//	DeleteMessageBatchRequestEntry.1.Id=foo
+//	DeleteMessageBatchRequestEntry.1.ReceiptHandle=rh1:...
+//	DeleteMessageBatchRequestEntry.1.VisibilityTimeout=0  (opcional)
+type QueryDeleteMessageBatchEntry struct {
+	Id               string
+	ReceiptHandle    string
+	VisibilityTimeout int32 // 0 → não muda (equivalente a DeleteMessage direto)
+}
+
+// ExtractQuerySendMessageBatchEntries extrai entries do SendMessageBatch em Query.
+//
+// Retorna slice na ordem dos índices (1..N) encontrados.
+func ExtractQuerySendMessageBatchEntries(params url.Values) []QuerySendMessageBatchEntry {
+	prefix := "SendMessageBatchRequestEntry."
+	indices := collectBatchIndices(params, prefix)
+
+	out := make([]QuerySendMessageBatchEntry, 0, len(indices))
+	for _, idx := range indices {
+		e := QuerySendMessageBatchEntry{
+			Id:                   params.Get(prefix + idx + ".Id"),
+			MessageBody:          params.Get(prefix + idx + ".MessageBody"),
+			DelaySeconds:         parseInt32DefaultQ(params.Get(prefix + idx + ".DelaySeconds")),
+			MessageGroupId:       params.Get(prefix + idx + ".MessageGroupId"),
+			MessageDeduplicationId: params.Get(prefix + idx + ".MessageDeduplicationId"),
+			MessageAttributes:    extractQueryEntryMsgAttrs(params, prefix+idx+".MessageAttribute"),
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// ExtractQueryDeleteMessageBatchEntries extrai entries do DeleteMessageBatch em Query.
+func ExtractQueryDeleteMessageBatchEntries(params url.Values) []QueryDeleteMessageBatchEntry {
+	prefix := "DeleteMessageBatchRequestEntry."
+	indices := collectBatchIndices(params, prefix)
+
+	out := make([]QueryDeleteMessageBatchEntry, 0, len(indices))
+	for _, idx := range indices {
+		e := QueryDeleteMessageBatchEntry{
+			Id:                params.Get(prefix + idx + ".Id"),
+			ReceiptHandle:     params.Get(prefix + idx + ".ReceiptHandle"),
+			VisibilityTimeout: parseInt32DefaultQ(params.Get(prefix + idx + ".VisibilityTimeout")),
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// collectBatchIndices encontra índices 1..N para entries de batch no form-encoded.
+//
+// Para um prefixo como "SendMessageBatchRequestEntry.", retorna ["1","2",...] na
+// ordem encontrada.
+func collectBatchIndices(params url.Values, prefix string) []string {
+	seen := make(map[string]bool)
+	var indices []string
+	for k := range params {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		rest := k[len(prefix):]
+		dot := strings.IndexByte(rest, '.')
+		if dot <= 0 {
+			continue
+		}
+		idx := rest[:dot]
+		if seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		indices = append(indices, idx)
+	}
+	sort.Strings(indices) // deterministic order
+	return indices
+}
+
+// extractQueryEntryMsgAttrs extrai MessageAttribute.N.* de uma entry de batch.
+//
+// prefix típico: "SendMessageBatchRequestEntry.1.MessageAttribute"
+func extractQueryEntryMsgAttrs(params url.Values, prefix string) map[string]MessageAttributeValue {
+	// Filtra apenas as chaves deste prefixo, depois reaproveita ExtractQueryMessageAttributes
+	// renomeando as chaves para "MessageAttribute.N.*".
+	filtered := make(url.Values)
+	for k, v := range params {
+		if strings.HasPrefix(k, prefix+".") {
+			// renomeia "1.Name" → "MessageAttribute.1.Name"
+			renamed := "MessageAttribute." + k[len(prefix)+1:]
+			filtered[renamed] = v
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return ExtractQueryMessageAttributes(filtered)
+}
+
+// parseInt32DefaultQ é uma versão interna de parseInt32Default que retorna 0 em erro.
+// Diferente do service.go (que retorna default configurável), aqui queremos 0 porque
+// é o valor "ausente" para campos opcionais em batch entries.
+func parseInt32DefaultQ(s string) int32 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int32(n)
 }

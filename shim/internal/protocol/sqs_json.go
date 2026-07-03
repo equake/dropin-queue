@@ -276,3 +276,125 @@ func parseJSONMsgAttr(out map[string]MessageAttributeValue, name string, obj map
 		}
 	}
 }
+
+// JSONSendMessageBatchEntry representa uma entry do SendMessageBatch em JSON.
+//
+// Formato AWS:
+//
+//	{"Id":"foo","MessageBody":"bar","DelaySeconds":0,
+//	 "MessageGroupId":"g1","MessageDeduplicationId":"d1",
+//	 "MessageAttributes":{"k":{"DataType":"String","StringValue":"v"}},
+//	 "MessageSystemAttributes":{...}}
+type JSONSendMessageBatchEntry struct {
+	Id                     string
+	MessageBody            string
+	DelaySeconds           int32
+	MessageGroupId         string
+	MessageDeduplicationId string
+	MessageAttributes      map[string]MessageAttributeValue
+}
+
+// JSONDeleteMessageBatchEntry representa uma entry do DeleteMessageBatch em JSON.
+//
+// Formato AWS:
+//
+//	{"Id":"foo","ReceiptHandle":"rh1:...","VisibilityTimeout":0}
+type JSONDeleteMessageBatchEntry struct {
+	Id                string
+	ReceiptHandle     string
+	VisibilityTimeout int32
+}
+
+// ExtractJSONSendMessageBatchEntries extrai entries do SendMessageBatch em JSON.
+//
+// Retorna slice na mesma ordem em que aparecem no array "Entries".
+func ExtractJSONSendMessageBatchEntries(params map[string]any) []JSONSendMessageBatchEntry {
+	arr, ok := params["Entries"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]JSONSendMessageBatchEntry, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		e := JSONSendMessageBatchEntry{
+			Id:                     jsonString(obj, "Id"),
+			MessageBody:            jsonString(obj, "MessageBody"),
+			MessageGroupId:         jsonString(obj, "MessageGroupId"),
+			MessageDeduplicationId: jsonString(obj, "MessageDeduplicationId"),
+		}
+		if f, ok := obj["DelaySeconds"].(float64); ok {
+			e.DelaySeconds = int32(f)
+		}
+		// MessageAttributes dentro de uma entry: boto3 envia formato compacto
+		// {"k":{"DataType":...}} em MessageAttributes, mas também aceita array
+		// em MessageAttribute.
+		e.MessageAttributes = extractJSONMsgAttrsFromObj(obj)
+		out = append(out, e)
+	}
+	return out
+}
+
+// ExtractJSONDeleteMessageBatchEntries extrai entries do DeleteMessageBatch em JSON.
+func ExtractJSONDeleteMessageBatchEntries(params map[string]any) []JSONDeleteMessageBatchEntry {
+	arr, ok := params["Entries"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]JSONDeleteMessageBatchEntry, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		e := JSONDeleteMessageBatchEntry{
+			Id:            jsonString(obj, "Id"),
+			ReceiptHandle: jsonString(obj, "ReceiptHandle"),
+		}
+		if f, ok := obj["VisibilityTimeout"].(float64); ok {
+			e.VisibilityTimeout = int32(f)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// extractJSONMsgAttrsFromObj extrai MessageAttributes de um objeto JSON de entry.
+//
+// Aceita ambos formatos (compacto map e array documentado) por entry, não apenas
+// do request inteiro.
+func extractJSONMsgAttrsFromObj(obj map[string]any) map[string]MessageAttributeValue {
+	out := make(map[string]MessageAttributeValue)
+	if raw, ok := obj["MessageAttributes"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			for name, v := range m {
+				if inner, ok := v.(map[string]any); ok {
+					parseJSONMsgAttr(out, name, inner)
+				}
+			}
+			return out
+		}
+	}
+	if raw, ok := obj["MessageAttribute"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, item := range arr {
+				if m, ok := item.(map[string]any); ok {
+					name, _ := m["Name"].(string)
+					if name == "" {
+						continue
+					}
+					parseJSONMsgAttr(out, name, m)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// jsonString helper para extrair string de map[string]any com fallback seguro.
+func jsonString(obj map[string]any, key string) string {
+	s, _ := obj[key].(string)
+	return s
+}
