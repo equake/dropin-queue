@@ -1,4 +1,4 @@
-module github.com/anomalyco/generic_queue/shim
+module github.com/equake/dropin-queue/shim
 
 go 1.25.0
 
