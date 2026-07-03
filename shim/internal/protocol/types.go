@@ -75,6 +75,9 @@ const (
 // Definido em SQS_API_VERSION env ou constante.
 const AWSProtocolVersion = "2012-11-05"
 
+// SNSProtocolVersion é a versão do protocolo SNS.
+const SNSProtocolVersion = "2010-03-31"
+
 // RequestKind identifica qual operação foi pedida, validada contra a
 // lista de ações conhecidas por serviço.
 type RequestKind struct {
