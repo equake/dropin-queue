@@ -527,17 +527,17 @@ type BatchDeleteEntry struct {
 
 // BatchResultEntry representa uma entry que teve sucesso.
 type BatchResultEntry struct {
-	Id            string
-	MessageID     string // SendMessageBatch: id da mensagem publicada
-	MD5OfBody     string // SendMessageBatch: MD5 do body
-	SequenceNo    string // FIFO only (SendMessageBatch)
+	Id         string
+	MessageID  string // SendMessageBatch: id da mensagem publicada
+	MD5OfBody  string // SendMessageBatch: MD5 do body
+	SequenceNo string // FIFO only (SendMessageBatch)
 }
 
 // BatchFailureEntry representa uma entry que falhou.
 type BatchFailureEntry struct {
-	Id         string
-	Code       string // AWS error code (e.g. "MessageTooLarge", "ReceiptHandleIsInvalid")
-	Message    string
+	Id          string
+	Code        string // AWS error code (e.g. "MessageTooLarge", "ReceiptHandleIsInvalid")
+	Message     string
 	SenderFault bool
 }
 
@@ -711,7 +711,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 // Extrai QueueUrl e SendMessageBatchRequestEntry.N.Id/MessageBody/etc.
 func SendMessageBatchParamsFromQuery(params url.Values) *SendMessageBatchParams {
 	p := &SendMessageBatchParams{
-		QueueURL: params.Get("QueueUrl"),
+		QueueURL:  params.Get("QueueUrl"),
 		QueueName: params.Get("QueueName"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
@@ -817,6 +817,12 @@ func (s *Service) DeleteMessageBatch(ctx context.Context, params *DeleteMessageB
 			}
 		}
 		seenIds[e.Id] = true
+	}
+
+	// Valida que a fila existe — caso contrário storage.DeleteMessage iria
+	// falhar per-entry com ReceiptHandleIsInvalid, que é misleading.
+	if _, err := s.storage.Queues().GetQueue(ctx, params.QueueName); err != nil {
+		return nil, err
 	}
 
 	result := &DeleteMessageBatchResult{
@@ -1672,7 +1678,9 @@ func (e *AWSError) IsSenderFault() bool {
 	switch e.Code {
 	case ErrCodeQueueAlreadyExists, ErrCodeQueueDoesNotExist,
 		ErrCodeInvalidParameterValue, ErrCodeMissingParameter,
-		ErrCodeOverLimit:
+		ErrCodeOverLimit, ErrCodeMessageTooLarge,
+		ErrCodeBatchEntryIdsNotDistinct, ErrCodeTooManyEntriesInBatch,
+		ErrCodeEmptyBatchRequest:
 		return true
 	}
 	return false

@@ -828,30 +828,30 @@ func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 // XML tags em ordem lexicográfica para determinismo (não estritamente necessário,
 // mas ajuda no diff de testes).
 type sendMessageBatchResultEntryQuery struct {
-	XMLName         xml.Name `xml:"SendMessageBatchResultEntry"`
-	Id              string   `xml:"Id"`
-	MessageId       string   `xml:"MessageId"`
-	MD5OfMessageBody string  `xml:"MD5OfMessageBody"`
-	SequenceNumber  string   `xml:"SequenceNumber,omitempty"`
+	XMLName          xml.Name `xml:"SendMessageBatchResultEntry"`
+	Id               string   `xml:"Id"`
+	MessageId        string   `xml:"MessageId"`
+	MD5OfMessageBody string   `xml:"MD5OfMessageBody"`
+	SequenceNumber   string   `xml:"SequenceNumber,omitempty"`
 }
 
 type batchFailureEntryQuery struct {
-	XMLName    xml.Name `xml:"BatchResultErrorEntry"`
-	Id         string   `xml:"Id"`
-	Code       string   `xml:"Code"`
-	Message    string   `xml:"Message"`
-	SenderFault bool    `xml:"SenderFault"`
+	XMLName     xml.Name `xml:"BatchResultErrorEntry"`
+	Id          string   `xml:"Id"`
+	Code        string   `xml:"Code"`
+	Message     string   `xml:"Message"`
+	SenderFault bool     `xml:"SenderFault"`
 }
 
 type sendMessageBatchResultQuery struct {
-	XMLName   xml.Name                          `xml:"SendMessageBatchResult"`
+	XMLName    xml.Name                           `xml:"SendMessageBatchResult"`
 	Successful []sendMessageBatchResultEntryQuery `xml:"SendMessageBatchResultEntry"`
-	Failed     []batchFailureEntryQuery          `xml:"BatchResultErrorEntry"`
+	Failed     []batchFailureEntryQuery           `xml:"BatchResultErrorEntry"`
 }
 
 type sendMessageBatchResponseQuery struct {
-	XMLName  xml.Name                   `xml:"SendMessageBatchResponse"`
-	Xmlns    string                     `xml:"xmlns,attr"`
+	XMLName  xml.Name `xml:"SendMessageBatchResponse"`
+	Xmlns    string   `xml:"xmlns,attr"`
 	Result   sendMessageBatchResultQuery
 	Metadata protocol.ResponseMetadata
 }
@@ -916,7 +916,7 @@ type batchFailureEntryJSON struct {
 
 type sendMessageBatchResponseJSON struct {
 	Successful []sendMessageBatchResultEntryJSON `json:"Successful"`
-	Failed     []batchFailureEntryJSON          `json:"Failed"`
+	Failed     []batchFailureEntryJSON           `json:"Failed"`
 }
 
 func (s *Server) handleSendMessageBatchJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -961,14 +961,14 @@ type deleteMessageBatchResultEntryQuery struct {
 }
 
 type deleteMessageBatchResultQuery struct {
-	XMLName    xml.Name                          `xml:"DeleteMessageBatchResult"`
+	XMLName    xml.Name                             `xml:"DeleteMessageBatchResult"`
 	Successful []deleteMessageBatchResultEntryQuery `xml:"DeleteMessageBatchResultEntry"`
-	Failed     []batchFailureEntryQuery          `xml:"BatchResultErrorEntry"`
+	Failed     []batchFailureEntryQuery             `xml:"BatchResultErrorEntry"`
 }
 
 type deleteMessageBatchResponseQuery struct {
-	XMLName  xml.Name                       `xml:"DeleteMessageBatchResponse"`
-	Xmlns    string                         `xml:"xmlns,attr"`
+	XMLName  xml.Name `xml:"DeleteMessageBatchResponse"`
+	Xmlns    string   `xml:"xmlns,attr"`
 	Result   deleteMessageBatchResultQuery
 	Metadata protocol.ResponseMetadata
 }
@@ -1016,7 +1016,7 @@ type deleteMessageBatchResultEntryJSON struct {
 
 type deleteMessageBatchResponseJSON struct {
 	Successful []deleteMessageBatchResultEntryJSON `json:"Successful"`
-	Failed     []batchFailureEntryJSON            `json:"Failed"`
+	Failed     []batchFailureEntryJSON             `json:"Failed"`
 }
 
 func (s *Server) handleDeleteMessageBatchJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {

@@ -337,12 +337,12 @@ func ExtractQuerySystemAttributes(params url.Values) map[string]string {
 //	SendMessageBatchRequestEntry.1.MessageAttribute.1.DataType=...
 //	SendMessageBatchRequestEntry.1.MessageAttribute.1.StringValue=...
 type QuerySendMessageBatchEntry struct {
-	Id                   string
-	MessageBody          string
-	DelaySeconds         int32
-	MessageGroupId       string
+	Id                     string
+	MessageBody            string
+	DelaySeconds           int32
+	MessageGroupId         string
 	MessageDeduplicationId string
-	MessageAttributes    map[string]MessageAttributeValue
+	MessageAttributes      map[string]MessageAttributeValue
 }
 
 // QueryDeleteMessageBatchEntry representa uma entry do DeleteMessageBatch em Query.
@@ -353,8 +353,8 @@ type QuerySendMessageBatchEntry struct {
 //	DeleteMessageBatchRequestEntry.1.ReceiptHandle=rh1:...
 //	DeleteMessageBatchRequestEntry.1.VisibilityTimeout=0  (opcional)
 type QueryDeleteMessageBatchEntry struct {
-	Id               string
-	ReceiptHandle    string
+	Id                string
+	ReceiptHandle     string
 	VisibilityTimeout int32 // 0 → não muda (equivalente a DeleteMessage direto)
 }
 
@@ -368,12 +368,12 @@ func ExtractQuerySendMessageBatchEntries(params url.Values) []QuerySendMessageBa
 	out := make([]QuerySendMessageBatchEntry, 0, len(indices))
 	for _, idx := range indices {
 		e := QuerySendMessageBatchEntry{
-			Id:                   params.Get(prefix + idx + ".Id"),
-			MessageBody:          params.Get(prefix + idx + ".MessageBody"),
-			DelaySeconds:         parseInt32DefaultQ(params.Get(prefix + idx + ".DelaySeconds")),
-			MessageGroupId:       params.Get(prefix + idx + ".MessageGroupId"),
+			Id:                     params.Get(prefix + idx + ".Id"),
+			MessageBody:            params.Get(prefix + idx + ".MessageBody"),
+			DelaySeconds:           parseInt32DefaultQ(params.Get(prefix + idx + ".DelaySeconds")),
+			MessageGroupId:         params.Get(prefix + idx + ".MessageGroupId"),
 			MessageDeduplicationId: params.Get(prefix + idx + ".MessageDeduplicationId"),
-			MessageAttributes:    extractQueryEntryMsgAttrs(params, prefix+idx+".MessageAttribute"),
+			MessageAttributes:      extractQueryEntryMsgAttrs(params, prefix+idx+".MessageAttribute"),
 		}
 		out = append(out, e)
 	}
