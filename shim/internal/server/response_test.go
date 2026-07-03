@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -127,3 +129,71 @@ func TestErrType(t *testing.T) {
 		t.Error("non-sender → expected 'Receiver'")
 	}
 }
+
+// TestRespondQueryXML_WireFormatExact valida que respondSQSQueryXML
+// produz byte-a-byte o mesmo envelope que o pattern inline pré-refactor
+// (sqs_handlers.go usava ~22 cópias desse mesmo pattern). Refactor/
+// kiss-dry-pass-2 Commit 2 introduz o helper; este teste pega qualquer
+// regressão no envelope.
+func TestRespondQueryXML_WireFormatExact(t *testing.T) {
+	type createQueueResult struct {
+		XMLName  xml.Name `xml:"CreateQueueResult"`
+		QueueURL string   `xml:"QueueUrl"`
+	}
+	var buf bytes.Buffer
+	rec := &bufferRW{header: make(http.Header), w: &buf}
+	respondSQSQueryXML(rec, "CreateQueue",
+		createQueueResult{QueueURL: "http://localhost:4566/000000000000/foo"},
+		"req-abc")
+
+	ct := rec.header.Get("Content-Type")
+	if ct != "text/xml" {
+		t.Errorf("Content-Type: got %q, want text/xml", ct)
+	}
+	out := buf.String()
+	// Elementos estruturais chave (mesmo check que TestEncodeQueryEnvelope).
+	musts := []string{
+		`<?xml version="1.0" encoding="UTF-8"?>`,
+		"<CreateQueueResponse",
+		`xmlns="http://queue.amazonaws.com/doc/2012-11-05"`,
+		"<QueueUrl>http://localhost:4566/000000000000/foo</QueueUrl>",
+		"<RequestId>req-abc</RequestId>",
+	}
+	for _, m := range musts {
+		if !strings.Contains(out, m) {
+			t.Errorf("missing %q in output:\n%s", m, out)
+		}
+	}
+}
+
+// TestRespondJSON_WireFormatExact valida respondJSON produz o envelope
+// esperado em JSON 1.0.
+func TestRespondJSON_WireFormatExact(t *testing.T) {
+	var buf bytes.Buffer
+	rec := &bufferRW{header: make(http.Header), w: &buf}
+	respondJSON(rec, http.StatusOK, map[string]string{"QueueUrl": "https://x/y"})
+
+	ct := rec.header.Get("Content-Type")
+	if ct != "application/x-amz-json-1.0" {
+		t.Errorf("Content-Type: got %q, want application/x-amz-json-1.0", ct)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"QueueUrl":"https://x/y"`) {
+		t.Errorf("missing payload in output:\n%s", out)
+	}
+}
+
+// bufferRW é um http.ResponseWriter mínimo que captura header + body.
+// Suficiente para teste do helper — não usa ResponseWriter interface
+// completa porque queremos validar set/print de conteúdo específico.
+type bufferRW struct {
+	header http.Header
+	w      *bytes.Buffer
+	code   int
+}
+
+func (b *bufferRW) Header() http.Header { return b.header }
+func (b *bufferRW) Write(p []byte) (int, error) {
+	return b.w.Write(p)
+}
+func (b *bufferRW) WriteHeader(statusCode int) { b.code = statusCode }

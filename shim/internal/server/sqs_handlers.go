@@ -44,29 +44,12 @@ func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, 
 
 	observability.ObserveHTTP("sqs", string(protocol.ActionCreateQueue), "200", 0)
 
-	type createQueueResult struct {
-		XMLName  xml.Name `xml:"CreateQueueResult"`
-		QueueURL string   `xml:"QueueUrl"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"CreateQueueResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   createQueueResult
-		Metadata protocol.ResponseMetadata
-	}
-
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result:   createQueueResult{QueueURL: q.URL},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionCreateQueue),
+		struct {
+			XMLName  xml.Name `xml:"CreateQueueResult"`
+			QueueURL string   `xml:"QueueUrl"`
+		}{QueueURL: q.URL},
+		newRequestID())
 }
 
 // handleCreateQueueJSON implementa CreateQueue via protocolo JSON 1.0 (JSON response).

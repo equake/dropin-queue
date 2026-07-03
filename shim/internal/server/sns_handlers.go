@@ -356,28 +356,12 @@ func (s *Server) handleSNSConfirmSubscriptionQuery(w http.ResponseWriter, r *htt
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, newRequestID())
 		return
 	}
-	type result struct {
-		XMLName         xml.Name `xml:"ConfirmSubscriptionResult"`
-		SubscriptionArn string   `xml:"SubscriptionArn"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"ConfirmSubscriptionResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result:   result{SubscriptionArn: res.SubscriptionARN},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionConfirmSubscription),
+		struct {
+			XMLName         xml.Name `xml:"ConfirmSubscriptionResult"`
+			SubscriptionArn string   `xml:"SubscriptionArn"`
+		}{SubscriptionArn: res.SubscriptionARN},
+		newRequestID())
 }
 
 // writeSubscriptionsXML serializa ListSubscriptions / ListSubscriptionsByTopic response.
