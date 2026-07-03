@@ -3,10 +3,7 @@ package protocol
 import (
 	"encoding/base64"
 	"encoding/xml"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -26,50 +23,12 @@ import (
 //	POST / HTTP/1.1
 //	Content-Type: application/x-www-form-urlencoded
 //	X-Amz-Date: 20240101T000000Z
-//	X-Amz-Algorithm: AWS4-HMAC-SHA256
+// X-Amz-Algorithm: AWS4-HMAC-SHA256
 //
 //	Action=CreateQueue&QueueName=myqueue&Version=2012-11-05
-func ParseSQSQueryRequest(r *http.Request) (Action, url.Values, error) {
-	if r.Method != http.MethodPost {
-		return "", nil, fmt.Errorf("SQS Query requer POST, recebeu %s", r.Method)
-	}
 
-	ct := r.Header.Get("Content-Type")
-	if ct != "" && !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-		// Tolerar Content-Type ausente (alguns clientes não enviam).
-		return "", nil, fmt.Errorf("Content-Type esperado application/x-www-form-urlencoded, recebeu %q", ct)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, MaxWireBodyBytes))
-	if err != nil {
-		return "", nil, fmt.Errorf("ler body: %w", err)
-	}
-	defer func() { _ = r.Body.Close() }()
-
-	if len(body) == 0 {
-		return "", nil, errors.New("body vazio")
-	}
-
-	values, err := url.ParseQuery(string(body))
-	if err != nil {
-		return "", nil, fmt.Errorf("parse form: %w", err)
-	}
-
-	actionStr := values.Get("Action")
-	if actionStr == "" {
-		return "", nil, errors.New("parâmetro Action ausente")
-	}
-	action := Action(actionStr)
-	if !IsValidAction(ServiceSQS, action) {
-		return "", nil, fmt.Errorf("Action inválido: %q", action)
-	}
-
-	// Remover Version e Action dos params (são metadados, não parâmetros da op).
-	values.Del("Version")
-	values.Del("Action")
-
-	return action, values, nil
-}
+// ParseSQSQueryRequest foi movido para common.go (refactor/kiss-dry-pass-1).
+// O thin wrapper abaixo preserva call sites existentes em server/http.go.
 
 // SQSQueryResponse é a estrutura envelopada de qualquer resposta SQS Query.
 //
@@ -91,84 +50,14 @@ type SQSQueryResponse struct {
 	ResponseMetadata ResponseMetadata
 }
 
-// ResponseMetadata é o envelope padrão de toda resposta AWS.
-type ResponseMetadata struct {
-	RequestID string `xml:"RequestId"`
-}
-
-// SQSErrorEnvelope é a estrutura de erros SQS Query.
+// ResponseMetadata, SQSErrorEnvelope e SQSError foram para common.go
+// (refactor/kiss-dry-pass-1). Mantidos aqui os structs específicos
+// do envelope SQS (SQSQueryResponse) só para compat com serializações
+// inline nos handlers — handlers NÃO usam mais SerializeSQSQueryResponse
+// (todos agora usam EncodeSQSQueryResponse via common.go).
 //
-// Formato AWS:
-//
-//	<?xml version="1.0" encoding="UTF-8"?>
-//	<ErrorResponse>
-//	  <Error>
-//	    <Type>Sender|Receiver</Type>
-//	    <Code>QueueAlreadyExists</Code>
-//	    <Message>...</Message>
-//	  </Error>
-//	  <RequestId>...</RequestId>
-//	</ErrorResponse>
-type SQSErrorEnvelope struct {
-	XMLName   xml.Name `xml:"ErrorResponse"`
-	Error     SQSError `xml:"Error"`
-	RequestID string   `xml:"RequestId"`
-}
-
-// SQSError representa um erro individual.
-type SQSError struct {
-	Type    string `xml:"Type"`
-	Code    string `xml:"Code"`
-	Message string `xml:"Message"`
-}
-
-// EncodeSQSQueryResponse serializa uma resposta SQS no formato XML.
-//
-// actionResult: estrutura específica da operação (struct com tags xml).
-// requestID: RequestId injetado em ResponseMetadata.
-func EncodeSQSQueryResponse(w io.Writer, action Action, actionResult interface{}, requestID string) error {
-	resp := SQSQueryResponse{
-		XMLName: xml.Name{Local: string(action) + "Response"},
-		Xmlns:   "http://queue.amazonaws.com/doc/" + AWSProtocolVersion,
-		Result:  actionResult,
-		ResponseMetadata: ResponseMetadata{
-			RequestID: requestID,
-		},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	if err := enc.Encode(resp); err != nil {
-		return err
-	}
-	return enc.Flush()
-}
-
-// EncodeSQSQueryError serializa um erro SQS no formato XML.
-//
-// Códigos AWS oficiais: QueueAlreadyExists, QueueDoesNotExist,
-// InvalidParameterValue, etc. (https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/CommonErrors.html)
-func EncodeSQSQueryError(w io.Writer, code, message, requestID string, senderFault bool) error {
-	typ := "Receiver"
-	if senderFault {
-		typ = "Sender"
-	}
-	env := SQSErrorEnvelope{
-		Error: SQSError{
-			Type:    typ,
-			Code:    code,
-			Message: message,
-		},
-		RequestID: requestID,
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	if err := enc.Encode(env); err != nil {
-		return err
-	}
-	return enc.Flush()
-}
+// ParseSQSQueryRequest também foi centralizado em parseWireQueryRequest
+// (common.go); o thin wrapper ParseSQSQueryRequest aqui preserva call sites.
 
 // SortValues devolve as form values ordenadas por chave (útil para logging).
 func SortValues(v url.Values) []string {
