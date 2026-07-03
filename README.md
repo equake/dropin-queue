@@ -101,7 +101,7 @@ NATS JetStream 2.10 + MinIO.
   - Validação de Ids únicos (BatchEntryIdsNotDistinct)
   - Validação de limite (TooManyEntriesInBatch)
   - Validação de soma de bodies ≤ 256 KiB
-- **38 commits granulares em português**, cada um com mensagem detalhada
+- **44 commits granulares em português** (até final da Fase 4), cada um com mensagem detalhada
 
 ### O que vem a seguir
 
@@ -120,8 +120,9 @@ NATS JetStream 2.10 + MinIO.
   por partition key (FIFO) ou round-robin assignment (Standard)
 - **AproximateNumberOfMessages** é contado a partir de `Stream.State.Msgs`
   que inclui mensagens já acked (lag de update do JetStream)
-- **Sem SNS ainda** — apenas SQS; subscriptions HTTP/HTTPS precisam de job
-  server assíncrono
+- **SNS subscriptions HTTP/HTTPS ficam pending** — `ConfirmSubscription`
+  é stub (retorna `UnsupportedOperation`); apenas protocol `sqs`
+  está totalmente funcional para fan-out
 
 ---
 
@@ -147,7 +148,7 @@ make smoke
 # test/integration/test_sqs_smoke.py::test_create_queue PASSED
 # test/integration/test_sqs_messages.py::test_send_and_receive_single PASSED
 # test/integration/test_sqs_messages.py::test_delete_message PASSED
-# ... 27 passed in ~14s
+# ... 65 passed in ~60s
 
 # Inspecionar logs do shim
 make logs-shim
@@ -278,59 +279,71 @@ Cada pacote em `shim/internal/` é isolado e testável:
 
 ---
 
-## Compatibilidade AWS — Roadmap
+## Compatibilidade AWS — Status atual
 
-Acompanhe em [`docs/api-compatibility.md`](docs/api-compatibility.md) (em construção).
+Esta seção reflete o que está **implementado e testado E2E** (65/65 testes passando).
+Tabela detalhada com cobertura por protocolo também está no topo do README.
+Acompanhe o progresso futuro em [`docs/api-compatibility.md`](docs/api-compatibility.md) (em construção).
 
-### SQS Standard
+### SQS Standard (13/13)
 
-- [x] `CreateQueue` — Semana 1
-- [ ] `SendMessage` — Semana 3
-- [ ] `ReceiveMessage` (long-poll) — Semana 3
-- [ ] `DeleteMessage` — Semana 3
-- [ ] `ChangeMessageVisibility` — Semana 3
-- [ ] `PurgeQueue` — Semana 3
-- [ ] `DeleteQueue` — Semana 3
-- [ ] `GetQueueAttributes` — Semana 3
-- [ ] `GetQueueUrl` — Semana 3
-- [ ] `ListQueues` — Semana 3
-- [ ] `SetQueueAttributes` — Semana 3
-- [ ] DLQ — Semana 3
+- [x] `CreateQueue`
+- [x] `GetQueueUrl`
+- [x] `GetQueueAttributes`
+- [x] `ListQueues`
+- [x] `DeleteQueue`
+- [x] `SetQueueAttributes`
+- [x] `SendMessage`
+- [x] `ReceiveMessage` (long-poll nativo via JetStream `FetchMaxWait`)
+- [x] `DeleteMessage`
+- [x] `ChangeMessageVisibility` (via `AckWait` + `NakWithDelay`)
+- [x] `PurgeQueue`
+- [x] DLQ (streams separados)
 
 ### SQS FIFO
 
-- [ ] `MessageGroupId` — Semana 3
-- [ ] `MessageDeduplicationId` — Semana 3
+- [x] `MessageGroupId` (particiona subject NATS → ordering dentro do grupo)
+- [x] `MessageDeduplicationId` (via `Nats-Msg-Id` para dedup explícito)
+- [x] `ContentBasedDeduplication` (SHA-256(body) → `Nats-Msg-Id` automático)
 
 ### SQS Batch
 
-- [ ] `SendMessageBatch` — Semana 3
-- [ ] `DeleteMessageBatch` — Semana 3
-- [ ] `ChangeMessageVisibilityBatch` — Semana 3
+- [x] `SendMessageBatch` (≤10 entries, partial success via `Failed[]`)
+- [x] `DeleteMessageBatch` (≤10 entries, partial success)
+- [ ] `ChangeMessageVisibilityBatch` — **não implementado** (próxima iteração)
 
-### SNS
+### SNS (9/9)
 
-- [ ] `CreateTopic` — Semana 4
-- [ ] `Subscribe` (sqs/http/https) — Semana 4
-- [ ] `Publish` — Semana 4
-- [ ] `ListSubscriptions` — Semana 4
-- [ ] `Unsubscribe` — Semana 4
-- [ ] `DeleteTopic` — Semana 4
-- [ ] `ConfirmSubscription` — Semana 4
-- [ ] `FilterPolicy` — Semana 4
+- [x] `CreateTopic`
+- [x] `GetTopicAttributes`
+- [x] `ListTopics`
+- [x] `DeleteTopic` (com cascade — remove subscriptions órfãs)
+- [x] `Subscribe`
+  - [x] protocol `sqs` (auto-confirmed, fan-out funciona)
+  - [ ] protocol `http` (pending — `ConfirmSubscription` stub)
+  - [ ] protocol `https` (pending — `ConfirmSubscription` stub)
+- [x] `Unsubscribe`
+- [x] `Publish` (fan-out síncrono para subscribers SQS)
+- [x] `ListSubscriptions`
+- [x] `ListSubscriptionsByTopic`
+- [x] `ConfirmSubscription` — **stub** (retorna `UnsupportedOperation` no MVP)
+- [x] `FilterPolicy` MVP (match exato `{key: [allowed_values]}`)
 
-### Auth & IAM
+### Auth & IAM (Fase 5 — próxima)
 
-- [ ] Verificação SigV4 — Semana 4
-- [ ] IAM store + policy evaluation — Semana 4
-- [ ] `shimctl` CLI — Semana 4
+- [ ] Verificação SigV4
+- [ ] IAM store + policy JSON evaluation
+- [ ] CLI `shimctl`
 
-### Infra
+### Infra (Fases 6-7)
 
-- [ ] Terraform modules — Semanas 5-6
-- [ ] HA + snapshots — Semana 5
-- [ ] Observability (Prometheus, Grafana, Loki, OTel) — Semana 5
-- [ ] Runbooks — Semana 6
+- [ ] Terraform módulos production-ready
+- [ ] HA multi-AZ + snapshots automáticos
+- [x] Observability **no shim** (Prometheus metrics + logs JSON estruturados
+      + OpenTelemetry tracing — tudo exposto em `/metrics` e OTLP endpoint)
+- [ ] Observability **stack completo** (Grafana dashboards, Loki log aggregation,
+      alerting rules)
+- [ ] Runbooks (backup, restore, failover, incident response)
 
 ---
 
