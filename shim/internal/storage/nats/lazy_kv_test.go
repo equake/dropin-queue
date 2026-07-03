@@ -34,12 +34,6 @@ func (l *lazyKVMini[T]) load(create func() (T, error)) (T, error) {
 	return v, nil
 }
 
-func (l *lazyKVMini[T]) invalidate() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.cache = nil
-}
-
 // fakeKVMarker é o tipo usado nos testes (em vez de jetstream.KeyValue).
 type fakeKVMarker struct{ id int }
 

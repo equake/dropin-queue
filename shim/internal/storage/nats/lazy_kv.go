@@ -36,11 +36,3 @@ func (l *lazyKVCache) loadKV(
 	l.cache = kv
 	return kv, nil
 }
-
-// invalidate descarta o cache (útil em DeleteTopic/DeleteSubscription
-// se quisermos forçar reload após alguma mudança externa).
-func (l *lazyKVCache) invalidate() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.cache = nil
-}

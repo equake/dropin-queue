@@ -35,11 +35,9 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/equake/dropin-queue/shim/internal/awserr"
-	"github.com/equake/dropin-queue/shim/internal/protocol"
 )
 
 // transport identifica qual par service/protocol estamos serializando.
@@ -104,9 +102,6 @@ func httpStatusLabel(err error) string {
 	return "500"
 }
 
-// sentinel importações para evitar go vet complaints em alguns cenários.
-var _ = fmt.Sprintf
-
 // writeFatalError serializa um erro AWS (Query ou JSON) com status HTTP correto.
 //
 // Substitui as 4 funções write<X><Y>FatalError do pré-refactor (commit 6
@@ -135,20 +130,23 @@ func writeFatalError(w http.ResponseWriter, t transport,
 	w.WriteHeader(status)
 
 	switch t {
-	case transportSQSQuery:
-		_ = protocol.EncodeSQSQueryError(w, code, message, requestID, err.IsSenderFault())
-	case transportSNSQuery:
-		_ = protocol.EncodeSNSQueryError(w, code, message, requestID, err.IsSenderFault())
-	case transportSQSJSON:
-		_ = protocol.EncodeSQSJSONError(w, code, message)
-	case transportSNSJSON:
-		_ = protocol.EncodeSNSJSONError(w, code, message)
+	case transportSQSQuery, transportSNSQuery:
+		// SQS e SNS compartilham EXATAMENTE o mesmo envelope de erro
+		// Query (mesma hierarquia XML, mesmas tags). Este é o único
+		// caminho com envelope genuinamente compartilhado da AWS.
+		_ = writeQueryErrorEnvelope(w, code, message, requestID, err.IsSenderFault())
+	case transportSQSJSON, transportSNSJSON:
+		// Mesmo princípio para JSON 1.0 — byte-a-byte idêntico entre
+		// os dois serviços ({"__type": ..., "message": ...}).
+		_ = encodeJSONError(w, code, message)
 	}
 }
 
 // errType devolve "Sender" ou "Receiver" baseado em senderFault.
-// Mantido para helper local (não precisa mais importar awserr.Error
-// aqui — só usávamos para IsSenderFault).
+//
+// Usado por writeQueryErrorEnvelope para popular <Error><Type>.
+// Centralizado aqui para evitar switch duplicado (era inline em 4
+// funções no pré-refactor).
 func errType(senderFault bool) string {
 	if senderFault {
 		return "Sender"
@@ -167,7 +165,10 @@ func errType(senderFault bool) string {
 //	</ErrorResponse>
 //
 // SQS e SNS usam EXATAMENTE o mesmo envelope (mesma hierarquia XML,
-// mesmas tags).
+// mesmas tags). O `protocol/` package tem EncodeSQSQueryError +
+// EncodeSNSQueryError que produzem esta mesma saída; aqui temos a
+// versão shared porque é literalmente o mesmo XML — não há razão para
+// duas funções.
 func writeQueryErrorEnvelope(w http.ResponseWriter, code, message,
 	requestID string, senderFault bool) error {
 
