@@ -1,10 +1,12 @@
 package sqs
 
 import (
+	"fmt"
 	"net/url"
 	"reflect"
 	"testing"
 
+	"github.com/equake/dropin-queue/shim/internal/protocol"
 	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
@@ -164,5 +166,43 @@ func TestAWSError_IsSenderFault(t *testing.T) {
 func TestAsAWSError_Nil(t *testing.T) {
 	if AsAWSError(nil) != nil {
 		t.Errorf("nil deve devolver nil")
+	}
+}
+
+func TestValidateMessageAttributes_Limit(t *testing.T) {
+	// Até 10 atributos: OK.
+	attrs := make(map[string]protocol.MessageAttributeValue)
+	for i := 0; i < MaxMessageAttributes; i++ {
+		attrs[fmt.Sprintf("attr%d", i)] = protocol.MessageAttributeValue{
+			DataType: "String", StringValue: "v",
+		}
+	}
+	if err := validateMessageAttributes(attrs); err != nil {
+		t.Errorf("10 atributos deve ser válido: %v", err)
+	}
+
+	// 11 atributos: InvalidParameterValue (limite AWS).
+	attrs["attr10"] = protocol.MessageAttributeValue{DataType: "String", StringValue: "v"}
+	err := validateMessageAttributes(attrs)
+	if err == nil {
+		t.Fatal("11 atributos deve ser rejeitado")
+	}
+	if err.Code != ErrCodeInvalidParameterValue {
+		t.Errorf("Code: got %s, want %s", err.Code, ErrCodeInvalidParameterValue)
+	}
+}
+
+func TestMessageAttributesSize(t *testing.T) {
+	attrs := map[string]protocol.MessageAttributeValue{
+		// 4 (nome) + 6 (String) + 5 (valor) = 15
+		"name": {DataType: "String", StringValue: "value"},
+		// 3 (nome) + 6 (Binary) + 4 (bytes) = 13
+		"bin": {DataType: "Binary", BinaryValue: []byte{1, 2, 3, 4}},
+	}
+	if got := messageAttributesSize(attrs); got != 28 {
+		t.Errorf("size: got %d, want 28", got)
+	}
+	if got := messageAttributesSize(nil); got != 0 {
+		t.Errorf("nil deve ter size 0, got %d", got)
 	}
 }

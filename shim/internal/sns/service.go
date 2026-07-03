@@ -621,10 +621,16 @@ func (s *Service) Publish(ctx context.Context, params *PublishParams) (*PublishR
 			Message: "Message é obrigatório",
 		}
 	}
-	if len(params.Message) > 256*1024 {
+	// Atributos contam no limite de 256 KiB junto com o body (igual AWS) —
+	// sem isso seriam um bypass ilimitado do limite de tamanho.
+	attrsSize := 0
+	for name, v := range params.MessageAttributes {
+		attrsSize += len(name) + len(v.DataType) + len(v.StringValue) + len(v.BinaryValue)
+	}
+	if len(params.Message)+attrsSize > 256*1024 {
 		return nil, &AWSError{
 			Code:    ErrCodeInvalidParameterValue,
-			Message: fmt.Sprintf("Message excede 256 KiB (%d bytes)", len(params.Message)),
+			Message: fmt.Sprintf("Message + atributos excede 256 KiB (%d bytes)", len(params.Message)+attrsSize),
 		}
 	}
 

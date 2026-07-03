@@ -503,7 +503,35 @@ const (
 	// MaxBatchTotalBytes é o tamanho máximo total dos bodies em um batch.
 	// 256 KiB conforme AWS docs.
 	MaxBatchTotalBytes = 256 * 1024
+
+	// MaxMessageAttributes é o máximo de message attributes por mensagem
+	// (limite AWS). Sem esse limite, atributos seriam um vetor de
+	// amplificação de payload fora do controle de MaximumMessageSize.
+	MaxMessageAttributes = 10
 )
+
+// messageAttributesSize soma o tamanho on-wire dos atributos (nome +
+// DataType + valor). AWS conta os atributos DENTRO do limite de 256 KiB
+// da mensagem — sem contar, atributos viram bypass ilimitado do limite.
+func messageAttributesSize(attrs map[string]protocol.MessageAttributeValue) int {
+	total := 0
+	for name, v := range attrs {
+		total += len(name) + len(v.DataType) + len(v.StringValue) + len(v.BinaryValue)
+	}
+	return total
+}
+
+// validateMessageAttributes valida a contagem de message attributes.
+func validateMessageAttributes(attrs map[string]protocol.MessageAttributeValue) *AWSError {
+	if len(attrs) > MaxMessageAttributes {
+		return &AWSError{
+			Code: ErrCodeInvalidParameterValue,
+			Message: fmt.Sprintf("Number of message attributes [%d] exceeds the allowed maximum [%d]",
+				len(attrs), MaxMessageAttributes),
+		}
+	}
+	return nil
+}
 
 // BatchSendEntry é uma entry do SendMessageBatch.
 //
@@ -611,7 +639,14 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 			}
 		}
 		seenIds[e.Id] = true
-		totalBodyBytes += len(e.MessageBody)
+		if aerr := validateMessageAttributes(e.MessageAttributes); aerr != nil {
+			return nil, &AWSError{
+				Code:    aerr.Code,
+				Message: fmt.Sprintf("Entries[%d]: %s", i, aerr.Message),
+			}
+		}
+		// Atributos contam no limite de 256 KiB do batch (igual AWS).
+		totalBodyBytes += len(e.MessageBody) + messageAttributesSize(e.MessageAttributes)
 	}
 	if totalBodyBytes > MaxBatchTotalBytes {
 		return nil, &AWSError{
@@ -957,10 +992,29 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 		}
 	}
 
+	// Valida MessageAttributes (máx 10, tamanho conta no limite).
+	if aerr := validateMessageAttributes(params.MessageAttributes); aerr != nil {
+		return nil, aerr
+	}
+
 	// Carrega fila para validar FIFO + DelaySeconds.
 	q, err := s.storage.Queues().GetQueue(ctx, params.QueueName)
 	if err != nil {
 		return nil, err
+	}
+
+	// Tamanho total (body + atributos) contra o MaximumMessageSize da
+	// fila — igual AWS. O storage revalida só o body; atributos são
+	// verificados aqui, onde o formato wire é conhecido.
+	maxSize := int(q.Attributes.MaximumMessageSize)
+	if maxSize == 0 {
+		maxSize = MaxBatchTotalBytes
+	}
+	if len(params.Body)+messageAttributesSize(params.MessageAttributes) > maxSize {
+		return nil, &AWSError{
+			Code:    ErrCodeMessageTooLarge,
+			Message: fmt.Sprintf("Mensagem (body + atributos) excede %d bytes", maxSize),
+		}
 	}
 	if q.FIFO {
 		if params.DelaySeconds > 0 {
@@ -1700,6 +1754,12 @@ func AsAWSError(err error) *AWSError {
 	}
 	if errors.Is(err, storage.ErrQueueAlreadyExists) {
 		return &AWSError{Code: ErrCodeQueueAlreadyExists, Message: err.Error()}
+	}
+	if errors.Is(err, storage.ErrQueueFull) {
+		// Backlog da fila cheio (DiscardNew rejeitou o publish). OverLimit
+		// sinaliza ao cliente para fazer backoff — nunca descartamos
+		// mensagens antigas silenciosamente.
+		return &AWSError{Code: ErrCodeOverLimit, Message: "fila atingiu o limite de backlog; tente novamente"}
 	}
 	var tooLarge storage.ErrMessageTooLargeT
 	if errors.As(err, &tooLarge) {
