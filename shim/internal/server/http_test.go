@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anomalyco/generic_queue/shim/internal/config"
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/config"
+	"github.com/equake/dropin-queue/shim/internal/observability"
 )
 
 func init() {

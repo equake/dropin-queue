@@ -22,10 +22,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
-	"github.com/anomalyco/generic_queue/shim/internal/protocol"
-	"github.com/anomalyco/generic_queue/shim/internal/storage"
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/protocol"
+	"github.com/equake/dropin-queue/shim/internal/storage"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 // AWSErrorCode são os códigos oficiais AWS SQS para erros que devolvemos.

@@ -19,7 +19,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/anomalyco/generic_queue/shim/internal/config"
+	"github.com/equake/dropin-queue/shim/internal/config"
 )
 
 // Logger é o logger padrão do shim. Sempre estruturado (JSON em prod,
@@ -70,7 +70,7 @@ func SetupLoggerTo(cfg config.Config, w io.Writer) *slog.Logger {
 	}
 
 	defaultLogger = slog.New(handler).With(
-		slog.String("service", "shimd"),
+		slog.String("service", "dropin-queue"),
 		slog.String("version", Version),
 	)
 	slog.SetDefault(defaultLogger)
@@ -113,7 +113,7 @@ func SetupTracing(ctx context.Context, cfg config.Config, w io.Writer) (func(con
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName("shimd"),
+			semconv.ServiceName("dropin-queue"),
 			semconv.ServiceVersion(Version),
 		),
 	)
@@ -136,7 +136,7 @@ func SetupTracing(ctx context.Context, cfg config.Config, w io.Writer) (func(con
 // StartSpan é um helper que inicia um span nomeado e devolve o contexto
 // enriquecido + função para finalizar. Loga erro se houver.
 func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	tracer := otel.Tracer("shimd")
+	tracer := otel.Tracer("dropin-queue")
 	return tracer.Start(ctx, name, trace.WithAttributes(attrs...))
 }
 

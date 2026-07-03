@@ -18,7 +18,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 // Erros sentinela que o storage pode devolver. A camada service traduz

@@ -32,12 +32,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
-	"github.com/anomalyco/generic_queue/shim/internal/protocol"
-	"github.com/anomalyco/generic_queue/shim/internal/sns"
-	"github.com/anomalyco/generic_queue/shim/internal/sqs"
-	"github.com/anomalyco/generic_queue/shim/internal/storage"
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/protocol"
+	"github.com/equake/dropin-queue/shim/internal/sns"
+	"github.com/equake/dropin-queue/shim/internal/sqs"
+	"github.com/equake/dropin-queue/shim/internal/storage"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 // Handlers contém os services injetados no servidor.

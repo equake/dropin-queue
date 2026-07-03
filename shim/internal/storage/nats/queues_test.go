@@ -6,7 +6,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 func TestSanitizeStreamName(t *testing.T) {

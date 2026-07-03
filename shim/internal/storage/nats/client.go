@@ -21,7 +21,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/observability"
 )
 
 const (

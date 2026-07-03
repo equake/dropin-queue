@@ -90,7 +90,7 @@ func TestLoad_Flags(t *testing.T) {
 	t.Setenv("GQ_AUTH_MODE", "")
 	t.Setenv("GQ_ACCOUNT_ID", "")
 
-	c, err := Load([]string{"shimd", "--addr=:5000", "--auth-mode=strict", "--account-id=111122223333"})
+	c, err := Load([]string{"dropin-queue", "--addr=:5000", "--auth-mode=strict", "--account-id=111122223333"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestLoad_Env(t *testing.T) {
 	t.Setenv("GQ_AUTH_MODE", "verify")
 	t.Setenv("GQ_SHUTDOWN_TIMEOUT", "5s")
 
-	c, err := Load([]string{"shimd"})
+	c, err := Load([]string{"dropin-queue"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestLoad_Env(t *testing.T) {
 func TestLoad_EnvOverridesDefaults(t *testing.T) {
 	t.Setenv("GQ_NATS_URL", "tls://nats.example.com:4222")
 
-	c, err := Load([]string{"shimd"})
+	c, err := Load([]string{"dropin-queue"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

@@ -1,7 +1,7 @@
 package nats
 
 import (
-	"github.com/anomalyco/generic_queue/shim/internal/storage"
+	"github.com/equake/dropin-queue/shim/internal/storage"
 )
 
 // Queues devolve o adapter de filas (próprio Client satisfaz QueueStorage).

@@ -46,7 +46,7 @@ const (
 	LogLevelError LogLevel = "error"
 )
 
-// Config é a configuração completa do shimd.
+// Config é a configuração completa do dropin-queue shim.
 type Config struct {
 	// Endereço HTTP que o shim escuta (host:porta). Default: :4566 (mesmo que LocalStack).
 	Addr string
@@ -108,7 +108,7 @@ func Default() Config {
 func Load(args []string) (Config, error) {
 	cfg := Default()
 
-	fs := flag.NewFlagSet("shimd", flag.ContinueOnError)
+	fs := flag.NewFlagSet("dropin-queue", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	fs.StringVar(&cfg.Addr, "addr", envOr("GQ_ADDR", cfg.Addr), "Endereço HTTP (host:porta)")

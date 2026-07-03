@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/observability"
 )
 
 // requestIDMiddleware extrai X-Request-ID do request (se houver) ou

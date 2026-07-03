@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 func TestIsValidQueueName(t *testing.T) {

@@ -15,9 +15,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
-	"github.com/anomalyco/generic_queue/shim/internal/storage"
-	"github.com/anomalyco/generic_queue/shim/pkg/types"
+	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/storage"
+	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
 // subjectForQueue retorna o subject JetStream para publicação em uma fila.
@@ -296,7 +296,7 @@ func (c *Client) ReceiveMessage(
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Name:           consumerName,
 		Durable:        consumerName,
-		Description:    "generic_queue shim receive consumer",
+		Description:    "dropin-queue shim receive consumer",
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		MaxAckPending:  1000,
 		AckWait:        time.Duration(visibilityTimeout) * time.Second,

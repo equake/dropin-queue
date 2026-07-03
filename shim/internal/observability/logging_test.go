@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anomalyco/generic_queue/shim/internal/config"
+	"github.com/equake/dropin-queue/shim/internal/config"
 )
 
 // captureLogger cria um logger que escreve em buffer para inspeção em testes.
@@ -38,7 +38,7 @@ func TestSetupLogger_JSONForInfo(t *testing.T) {
 	if m["key"] != "value" {
 		t.Errorf("key field: got %v", m["key"])
 	}
-	if m["service"] != "shimd" {
+	if m["service"] != "dropin-queue" {
 		t.Errorf("service field: got %v", m["service"])
 	}
 }
