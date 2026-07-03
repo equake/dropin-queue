@@ -1,9 +1,9 @@
 # docker-compose.yml — stack dev local
 #
-# Sobe o ambiente mínimo para testar o shim:
+# Sobe o ambiente mínimo para testar o dropin-queue:
 #   - nats:    NATS JetStream em modo single-node (sem cluster para dev)
 #   - minio:   Object storage S3-compatible para JetStream file storage (futuro)
-#   - shim:    Build do shimd localmente, conectado ao nats
+#   - shim:    Build do dropin-server localmente, conectado ao nats
 #
 # Uso:
 #   docker compose up -d       # sobe tudo
@@ -12,13 +12,13 @@
 #   docker compose down        # derruba
 #   docker compose down -v     # remove volumes também
 
-name: generic-queue-dev
+name: dropin-queue-dev
 
 services:
   # --- NATS JetStream ---
   nats:
     image: nats:2.10-alpine
-    container_name: gq-nats
+    container_name: dq-nats
     command: ["nats-server", "-js", "-sd", "/data", "-m", "8222"]
     ports:
       - "4222:4222"   # client traffic
@@ -32,14 +32,14 @@ services:
       retries: 10
       start_period: 5s
     networks:
-      - gq-net
+      - dq-net
 
   # --- MinIO (S3-compatible object storage) ---
   # Por enquanto apenas provisionado para uso futuro com JetStream
-  # File Storage snapshots. O shim não usa ainda.
+  # File Storage snapshots. O dropin-server não usa ainda.
   minio:
     image: minio/minio:latest
-    container_name: gq-minio
+    container_name: dq-minio
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -56,16 +56,16 @@ services:
       retries: 10
       start_period: 10s
     networks:
-      - gq-net
+      - dq-net
 
-  # --- Shimd (AWS API) ---
+  # --- dropin-server (AWS API) ---
   shim:
     build:
       context: .
       dockerfile: shim/Dockerfile
       args:
         VERSION: dev-local
-    container_name: gq-shim
+    container_name: dq-shim
     depends_on:
       nats:
         condition: service_healthy
@@ -82,13 +82,13 @@ services:
     ports:
       - "4566:4566"
     networks:
-      - gq-net
+      - dq-net
     # Healthcheck: usa python (instalado no builder, não no runtime)
     # Para healthcheck em produção, configure via orchestrator (k8s/docker)
     # apontando para /healthz e /readyz.
 
 networks:
-  gq-net:
+  dq-net:
     driver: bridge
 
 volumes:

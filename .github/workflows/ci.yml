@@ -40,7 +40,7 @@ jobs:
 
       - name: Build
         working-directory: shim
-        run: go build -trimpath -o /tmp/shimd ./cmd/shimd
+        run: go build -trimpath -o /tmp/dropin-server ./cmd/dropin-server
 
       - name: Test (com race detector)
         working-directory: shim
@@ -139,6 +139,6 @@ jobs:
         with:
           context: .
           file: shim/Dockerfile
-          tags: shimd:ci-${{ github.sha }}
+          tags: dropin-queue:ci-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

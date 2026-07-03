@@ -1,8 +1,8 @@
-# generic_queue
+# dropin-queue
 
-> Clone auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go sobre NATS JetStream.
+> **Drop-in replacement AWS SQS/SNS over NATS JetStream**
 
-`generic_queue` oferece uma API HTTP que fala os mesmos protocolos (`Query` e `JSON`) e devolve
+`dropin-queue` oferece uma API HTTP que fala os mesmos protocolos (`Query` e `JSON`) e devolve
 as mesmas respostas que os serviços gerenciados da AWS. Você aponta qualquer cliente oficial
 (`boto3`, `aws-sdk-go-v2`, `aws-sdk-js`, `aws-sdk-java`, `aws-cli`, SDK da sua linguagem favorita)
 para o endpoint do shim e tudo funciona como antes — sem precisar de uma conta AWS.
@@ -16,7 +16,7 @@ A camada de mensageria por baixo é o **NATS JetStream**, que entrega:
 - Dedup nativo via `Nats-Msg-Id` (compatível com `MessageDeduplicationId` do SQS FIFO)
 - Single binary, ~6 MB de RAM cold start
 
-A camada de API é um **shim em Go** (`shimd`) que implementa:
+A camada de API é um **shim em Go** (`dropin-server`) que implementa:
 
 - Parsers/serializers dos protocolos AWS SQS Query, SQS JSON, SNS Query, SNS JSON
 - Verificação de **AWS Signature v4** (SigV4) com IAM real (policy JSON evaluation)
@@ -137,7 +137,7 @@ NATS JetStream 2.10 + MinIO.
 ### Subindo o stack dev
 
 ```bash
-# Sobe NATS JetStream + MinIO + shimd em background
+# Sobe NATS JetStream + MinIO + dropin-server em background
 make up
 
 # Aguarda ~5s e roda o smoke test
@@ -196,7 +196,7 @@ aws --endpoint-url http://localhost:4566 \
                        │ HTTPS · SigV4
                        ▼
 ┌─────────────────────────────────────────────┐
-│  shimd (Go, stateless, N réplicas)          │
+│  dropin-server (Go, stateless, N réplicas)  │
 │  ┌─────────────┬──────────────┬──────────┐  │
 │  │ awssig      │ protocol     │ iam      │  │
 │  ├─────────────┴──────────────┴──────────┤  │
@@ -224,9 +224,9 @@ Detalhes em [`docs/architecture.md`](docs/architecture.md).
 ## Estrutura do repositório
 
 ```
-generic_queue/
+dropin-queue/
 ├── shim/                # API shim em Go (o coração do projeto)
-│   ├── cmd/shimd/       # entrypoint
+│   ├── cmd/dropin-server/   # entrypoint
 │   ├── internal/        # código privado (awssig, protocol, sqs, sns, iam, storage, ...)
 │   ├── pkg/types/       # tipos públicos compartilhados
 │   └── test/            # testes de integração (boto3 contra o shim)
@@ -246,10 +246,10 @@ generic_queue/
 make help              # lista todos os targets
 make up                # sobe docker-compose
 make down              # derruba docker-compose
-make build             # builda shimd
+make build             # builda dropin-server
 make test              # roda testes Go
 make test-int          # roda testes de integração (boto3 + shim rodando)
-make smoke             # roda o smoke test da semana 1
+make smoke             # roda o smoke test rápido
 make lint              # roda golangci-lint
 make fmt               # formata código Go
 make logs-shim         # tail logs do shim

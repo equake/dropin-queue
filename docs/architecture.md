@@ -1,6 +1,6 @@
-# Arquitetura do generic_queue
+# Arquitetura do dropin-queue
 
-Este documento descreve a arquitetura do `generic_queue`, um clone
+Este documento descreve a arquitetura do `dropin-queue`, um clone
 auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go
 sobre NATS JetStream.
 
@@ -22,7 +22,7 @@ sobre NATS JetStream.
                           │ HTTPS · SigV4 (ou dummy em dev)
                           ▼
 ┌───────────────────────────────────────────────────────────────┐
-│              shimd — API compatível AWS (Go)                  │
+│              dropin-server — API compatível AWS (Go)           │
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │  server/   chi router · middleware · handlers AWS      │  │
 │  ├─────────────────────────────────────────────────────────┤  │
@@ -60,7 +60,7 @@ sobre NATS JetStream.
 
 ## Camadas do shim
 
-### 1. `cmd/shimd` — entrypoint
+### 1. `cmd/dropin-server` — entrypoint
 
 Responsabilidade: lifecycle do processo (config → logger → metrics →
 tracing → storage → services → HTTP server → shutdown gracioso).
