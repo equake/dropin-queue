@@ -288,7 +288,7 @@ Cada pacote em `shim/internal/` é isolado e testável:
 
 Esta seção reflete o que está **implementado e testado E2E** (65/65 testes passando).
 Tabela detalhada com cobertura por protocolo também está no topo do README.
-Acompanhe o progresso futuro em [`docs/api-compatibility.md`](docs/api-compatibility.md) (em construção).
+Acompanhe o progresso futuro em [`docs/api-compatibility.md`](docs/api-compatibility.md).
 
 ### SQS Standard (13/13)
 
