@@ -11,7 +11,8 @@
 //
 //	GQ_ADDR, GQ_NATS_URL, GQ_NATS_CREDS, GQ_NATS_CA_CERT,
 //	GQ_ACCOUNT_ID, GQ_REGION, GQ_AUTH_MODE, GQ_LOG_LEVEL,
-//	GQ_METRICS_ADDR, GQ_SHUTDOWN_TIMEOUT, GQ_MAX_BODY_BYTES
+//	GQ_METRICS_ADDR, GQ_SHUTDOWN_TIMEOUT, GQ_MAX_BODY_BYTES,
+//	GQ_STREAM_REPLICAS, GQ_MAX_ACK_PENDING, GQ_TOPIC_MAX_AGE
 //
 // Exemplos:
 //
@@ -93,6 +94,9 @@ func run() error {
 		CACert:          cfg.NATSCACert,
 		Name:            "dropin-queue",
 		Prefix:          prefix,
+		StreamReplicas:  cfg.StreamReplicas,
+		MaxAckPending:   cfg.MaxAckPending,
+		TopicMaxAge:     cfg.TopicMaxAge,
 	})
 	if err != nil {
 		return fmt.Errorf("connect storage: %w", err)

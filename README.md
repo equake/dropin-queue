@@ -82,9 +82,9 @@ A camada de API é um **shim em Go** (`dropin-server`) que implementa:
 - **ConfirmSubscription** stub (UnsupportedOperation no MVP; subscriptions
   HTTP/HTTPS ficam pending)
 
-**Cobertura de testes:** 65/65 passando (12 SQS smoke + 15 SQS messages +
-18 SQS batch + 20 SNS) em ~60s contra shim rodando em docker-compose com
-NATS JetStream 2.10 + MinIO.
+**Cobertura de testes:** 70/70 passando (12 SQS smoke + 15 SQS messages +
+18 SQS batch + 5 SQS limits + 20 SNS) em ~60s contra shim rodando em
+docker-compose com NATS JetStream 2.14 + MinIO.
 
 ### Funcionalidades SQS implementadas
 
@@ -93,8 +93,19 @@ NATS JetStream 2.10 + MinIO.
 - **MessageAttribute round-trip**: DataType preservado (String, Number, Binary base64, String.List)
 - **Long-polling nativo** via `FetchMaxWait` do JetStream
 - **Visibility timeout** via `AckWait` + `NakWithDelay`
-- **Receipt handles versionados** `rh1:<consumer>:<seq>` com cache de ack
-- **Consumer durável único por fila** (AckExplicitPolicy, MaxAckPending=1000)
+- **Receipt handles stateless** `rh2:<base64url(reply-subject)>` — o handle
+  carrega o reply subject `$JS.ACK` do JetStream; DeleteMessage funciona em
+  **qualquer réplica** do shim (sem sticky session, sem estado local)
+- **Consumer durável por fila** criado no CreateQueue e cacheado
+  (AckExplicitPolicy, `GQ_MAX_ACK_PENDING`, default 1000) — múltiplas
+  réplicas compartilham o mesmo pull consumer
+- **Retention WorkQueue**: mensagem consumida (acked) é apagada do disco na
+  hora — custo de armazenamento proporcional ao backlog, não ao throughput
+- **Backlog cheio rejeita publish** (`DiscardNew` → erro `OverLimit`);
+  mensagens antigas nunca são descartadas silenciosamente
+- **Validação de MessageAttributes**: máx 10 por mensagem; tamanho dos
+  atributos conta no limite de 256 KiB (igual AWS)
+- **ApproximateReceiveCount real** via `NumDelivered` do JetStream
 - **FIFO queues completas**:
   - MessageGroupId particiona subject NATS → ordering dentro do grupo preservado
   - MessageDeduplicationId via Nats-Msg-Id (dedup explícito)
@@ -120,14 +131,25 @@ NATS JetStream 2.10 + MinIO.
 
 - **AUTH_MODE=off** — sem verificação SigV4 no dev; qualquer credencial é aceita
 - **Sem IAM** — policy evaluation não implementada
-- **Consumer único por fila** — não suporta múltiplos clients paralelos
-  consumindo da mesma fila (SQS Standard permite). Solução em prod: sharding
-  por partition key (FIFO) ou round-robin assignment (Standard)
-- **AproximateNumberOfMessages** é contado a partir de `Stream.State.Msgs`
-  que inclui mensagens já acked (lag de update do JetStream)
 - **SNS subscriptions HTTP/HTTPS ficam pending** — `ConfirmSubscription`
   é stub (retorna `UnsupportedOperation`); apenas protocol `sqs`
   está totalmente funcional para fan-out
+- **Fan-out SNS é síncrono** (bound de 16 deliveries paralelas); latência do
+  Publish cresce com o número de subscriptions. Fan-out assíncrono durável
+  está no roadmap
+- **VisibilityTimeout por request** diferente do default da fila atualiza o
+  `AckWait` do consumer compartilhado (afeta a fila toda, não só o request)
+
+### Migração de versões antigas
+
+- **Retention mudou de LimitsPolicy → WorkQueuePolicy** e não pode ser
+  alterada em stream existente: filas criadas por versões antigas precisam
+  ser recriadas (`make down-v` em dev apaga tudo)
+- **Receipt handles `rh1:` foram substituídos por `rh2:`** — handles em voo
+  de versões antigas são rejeitados com `ReceiptHandleIsInvalid`
+- **Produção agora exige `GQ_STREAM_REPLICAS=3`** quando `GQ_AUTH_MODE` é
+  `verify`/`strict` — a config é rejeitada com 1 réplica (fail-loud em vez
+  de rodar sem HA silenciosamente)
 
 ---
 
@@ -190,6 +212,22 @@ aws --endpoint-url http://localhost:4566 \
 
 > **Importante:** no modo dev (`AUTH_MODE=off`), o shim aceita qualquer credencial
 > e não valida assinatura SigV4. Use apenas para desenvolvimento e testes.
+
+### Configuração (env vars / flags)
+
+| Env var (`GQ_*`)      | Flag                 | Default   | Descrição |
+|-----------------------|----------------------|-----------|-----------|
+| `GQ_ADDR`             | `--addr`             | `:4566`   | Endereço HTTP |
+| `GQ_NATS_URL`         | `--nats-url`         | `nats://localhost:4222` | Broker (suporta `tls://`) |
+| `GQ_AUTH_MODE`        | `--auth-mode`        | `off`     | `off\|verify\|strict` |
+| `GQ_STREAM_REPLICAS`  | `--stream-replicas`  | `1`       | Réplicas Raft por stream (1/3/5). **Produção = 3**; `verify`/`strict` com 1 réplica é rejeitado |
+| `GQ_MAX_ACK_PENDING`  | `--max-ack-pending`  | `1000`    | Máx mensagens in-flight por fila |
+| `GQ_TOPIC_MAX_AGE`    | `--topic-max-age`    | `1h`      | Retenção do stream de arquivo dos tópicos SNS |
+| `GQ_MAX_BODY_BYTES`   | `--max-body-bytes`   | `262144`  | Tamanho máx de request body |
+| `GQ_SHUTDOWN_TIMEOUT` | `--shutdown-timeout` | `30s`     | Shutdown gracioso |
+
+Lista completa em `dropin-server --help` (`GQ_ACCOUNT_ID`, `GQ_REGION`,
+`GQ_LOG_LEVEL`, `GQ_METRICS_ADDR`, `GQ_NATS_CREDS`, `GQ_NATS_CA_CERT`).
 
 ---
 
@@ -280,7 +318,8 @@ Cada pacote em `shim/internal/` é isolado e testável:
 
 - **Unitários**: `go test ./shim/...` (não precisam de infra)
 - **Integração**: `make test-int` (sobe docker-compose, roda pytest contra boto3)
-- **E2E**: `make test-e2e` (aponta para ambiente real provisionado por Terraform)
+- **E2E contra ambiente real**: planejado para a Fase 6 (Terraform) —
+  o target `make test-e2e` ainda não existe
 
 ---
 

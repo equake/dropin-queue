@@ -13,35 +13,43 @@ import (
 	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
+// defaultMaxMsgsPerQueue é o backlog máximo de mensagens NÃO-consumidas
+// por fila. Com WorkQueuePolicy, mensagens acked são removidas na hora,
+// então este limite só é atingido se consumers pararem de consumir.
+const defaultMaxMsgsPerQueue = 10_000_000
+
 // streamCfg converte uma Queue em configuração JetStream.
 //
 // Mapeamentos:
 //   - Stream name: "queue-<sanitized-name>" (JetStream não aceita "." em nomes)
 //   - Subjects: "q.<name>.>" (wildcard)
 //   - Storage: File (persistência em disco)
-//   - Replicas: 3 em produção, 1 em dev
-//   - Retention: Limits (apaga mensagens após MaxAge ou MaxMsgs)
-//   - MaxAge: MessageRetentionPeriod
-//   - MaxMsgs: limite duro para evitar OOM
-func (c *Client) streamCfg(q types.Queue, devMode bool) jetstream.StreamConfig {
+//   - Replicas: c.replicas (config GQ_STREAM_REPLICAS — nunca inferido)
+//   - Retention: WorkQueue — mensagem é APAGADA no ack (DeleteMessage).
+//     Igual a SQS: consumida = removida. Sem isso (LimitsPolicy), toda
+//     mensagem já consumida ficaria em disco até MaxAge — a milhões de
+//     msgs/dia isso multiplica o custo de armazenamento por ordens de
+//     magnitude sem nenhum benefício.
+//   - Discard: DiscardNew — fila cheia REJEITA o publish com erro
+//     (mapeado para throttling na camada service). DiscardOld descartaria
+//     silenciosamente mensagens antigas não-consumidas: perda de dados,
+//     inaceitável (SQS nunca perde mensagem dentro da retenção).
+//   - MaxAge: MessageRetentionPeriod (mensagens não-consumidas expiram)
+//   - MaxMsgs: limite duro de backlog para evitar OOM/disco cheio
+//
+// NOTA: Retention não pode ser alterada em stream existente (JetStream).
+// Streams criados por versões antigas (LimitsPolicy) precisam ser
+// recriados para adotar WorkQueuePolicy.
+func (c *Client) streamCfg(q types.Queue) jetstream.StreamConfig {
 	cfg := jetstream.StreamConfig{
-		Name:     "queue-" + sanitizeStreamName(q.Name),
-		Subjects: []string{c.queueSubject(q.Name) + ".>"},
-		Storage:  jetstream.FileStorage,
-		Discard:  jetstream.DiscardOld,
+		Name:      "queue-" + sanitizeStreamName(q.Name),
+		Subjects:  []string{c.queueSubject(q.Name) + ".>"},
+		Storage:   jetstream.FileStorage,
+		Discard:   jetstream.DiscardNew,
+		Retention: jetstream.WorkQueuePolicy,
+		Replicas:  c.replicas,
+		MaxMsgs:   defaultMaxMsgsPerQueue,
 	}
-
-	if devMode {
-		cfg.Replicas = 1
-	} else {
-		cfg.Replicas = 3
-	}
-
-	// Mensagens: limite default 10M por fila. Ajustável via attr.
-	cfg.MaxMsgs = 10_000_000
-
-	// Retention
-	cfg.Retention = jetstream.LimitsPolicy
 
 	if q.Attributes.MessageRetentionPeriod > 0 {
 		cfg.MaxAge = time.Duration(q.Attributes.MessageRetentionPeriod) * time.Second
@@ -88,7 +96,7 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 	start := time.Now()
 	defer func() { observability.ObserveStorage("create_queue", nil, time.Since(start)) }()
 
-	cfg := c.streamCfg(q, c.isDevMode())
+	cfg := c.streamCfg(q)
 
 	// Tenta criar; se já existe, busca e devolve (idempotência SQS).
 	s, err := c.js.CreateStream(ctx, cfg)
@@ -126,6 +134,18 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 	// CreateQueue se KV falhar; stream já foi criado).
 	if err := c.saveQueueMetadata(ctx, q); err != nil {
 		observability.L().Warn("falha ao persistir metadata KV",
+			"queue", q.Name, "err", err.Error())
+	}
+
+	// Cria o consumer durável da fila já na criação (best-effort).
+	// Evita a latência de CreateOrUpdateConsumer no primeiro
+	// ReceiveMessage e registra o filter subject no stream WorkQueue.
+	visibility := q.Attributes.VisibilityTimeout
+	if visibility <= 0 {
+		visibility = 30
+	}
+	if _, err := c.ensureQueueConsumer(ctx, s, q.Name, visibility); err != nil {
+		observability.L().Warn("falha ao pré-criar consumer da fila",
 			"queue", q.Name, "err", err.Error())
 	}
 
@@ -174,6 +194,7 @@ func (c *Client) DeleteQueue(ctx context.Context, name string) error {
 	streamName := "queue-" + sanitizeStreamName(name)
 	err := c.js.DeleteStream(ctx, streamName)
 	c.invalidateStream(streamName)
+	c.invalidateConsumer(queueConsumerName(name))
 	if err != nil && !errors.Is(err, jetstream.ErrStreamNotFound) {
 		return fmt.Errorf("delete stream: %w", err)
 	}
@@ -198,14 +219,6 @@ func (c *Client) PurgeQueue(ctx context.Context, name string) error {
 		return fmt.Errorf("purge: %w", err)
 	}
 	return nil
-}
-
-// isDevMode detecta se estamos em modo dev (1 réplica).
-//
-// Critério atual: sem prefixo definido E nome "dev" em env. Será refinado
-// quando tivermos config injetada.
-func (c *Client) isDevMode() bool {
-	return c.prefix == ""
 }
 
 func hasPrefix(s, prefix string) bool {

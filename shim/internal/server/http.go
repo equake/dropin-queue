@@ -307,7 +307,7 @@ func (s *Server) handleCreateQueueJSON(w http.ResponseWriter, r *http.Request, p
 
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
+	_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
 }
 
 // writeSQSJSONFatalError serializa erro SQS JSON 1.0 com status correto.
@@ -319,7 +319,7 @@ func writeSQSJSONFatalError(w http.ResponseWriter, code, message string) {
 		status = http.StatusBadRequest
 	}
 	w.WriteHeader(status)
-_ = protocol.EncodeSQSJSONError(w, code, message)
+	_ = protocol.EncodeSQSJSONError(w, code, message)
 }
 
 // statusFromAWSError converte classificação para string de status HTTP.
@@ -488,7 +488,7 @@ func (s *Server) handleGetQueueUrlJSON(w http.ResponseWriter, r *http.Request, p
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
+	_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
 }
 
 func (s *Server) handleGetQueueAttributesJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -501,7 +501,7 @@ func (s *Server) handleGetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	// AWS JSON 1.0 GetQueueAttributes devolve {"Attributes": {"name": "value", ...}}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-_ = protocol.EncodeSQSJSONResponse(w, map[string]map[string]string{
+	_ = protocol.EncodeSQSJSONResponse(w, map[string]map[string]string{
 		"Attributes": attrs,
 	})
 }
@@ -515,7 +515,7 @@ func (s *Server) handleListQueuesJSON(w http.ResponseWriter, r *http.Request, pa
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-_ = protocol.EncodeSQSJSONResponse(w, map[string]any{
+	_ = protocol.EncodeSQSJSONResponse(w, map[string]any{
 		"QueueUrls": res.QueueUrls,
 	})
 }
@@ -583,7 +583,7 @@ func (s *Server) handleSendMessageJSON(w http.ResponseWriter, r *http.Request, p
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-_ = protocol.EncodeSQSJSONResponse(w, map[string]string{
+	_ = protocol.EncodeSQSJSONResponse(w, map[string]string{
 		"MessageId":      res.MessageID,
 		"MD5OfMessage":   res.MD5OfBody,
 		"SequenceNumber": res.SequenceNo,
@@ -716,7 +716,7 @@ func (s *Server) handleReceiveMessageJSON(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-_ = protocol.EncodeSQSJSONResponse(w, map[string]any{"Messages": out})
+	_ = protocol.EncodeSQSJSONResponse(w, map[string]any{"Messages": out})
 }
 
 // --- DeleteMessage ---
@@ -1115,10 +1115,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"no_storage"}`))
 		return
 	}
-	// Tenta uma operação leve no storage como health check.
+	// Ping é O(1) (status da conexão + AccountInfo). NÃO usar ListQueues
+	// aqui: listagem é O(n) filas e o probe roda a cada poucos segundos
+	// em cada réplica — com milhares de filas viraria carga real no broker.
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if _, err := s.handlers.Storage.Queues().ListQueues(ctx, ""); err != nil {
+	if err := s.handlers.Storage.Ping(ctx); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = fmt.Fprintf(w, `{"status":"broker_unavailable","error":%q}`, err.Error())
 		return

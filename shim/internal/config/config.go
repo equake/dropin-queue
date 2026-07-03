@@ -85,6 +85,23 @@ type Config struct {
 
 	// MaxRequestBodyBytes limita tamanho de body aceito (defesa contra DoS).
 	MaxRequestBodyBytes int64
+
+	// StreamReplicas é o número de réplicas Raft de cada stream JetStream
+	// (filas e tópicos). 1 para dev/single-node; 3 para produção HA.
+	// **Nunca inferido** — deploy de produção DEVE setar GQ_STREAM_REPLICAS=3
+	// explicitamente, senão roda sem HA.
+	StreamReplicas int
+
+	// MaxAckPending limita quantas mensagens podem estar in-flight
+	// (recebidas e não-acked) por fila. Equivale ao limite de mensagens
+	// invisíveis do SQS (120k por fila). Valores maiores aumentam
+	// throughput de consumo paralelo às custas de memória no broker.
+	MaxAckPending int
+
+	// TopicMaxAge é a retenção do stream de arquivo de cada tópico SNS.
+	// O fan-out para subscribers é síncrono no Publish; o stream do tópico
+	// é apenas um registro histórico. Retenção curta = custo de disco baixo.
+	TopicMaxAge time.Duration
 }
 
 // Default retorna configuração default segura para dev.
@@ -99,6 +116,9 @@ func Default() Config {
 		MetricsAddr:         "",
 		ShutdownTimeout:     30 * time.Second,
 		MaxRequestBodyBytes: 262144, // 256 KiB, mesmo que SQS
+		StreamReplicas:      1,      // dev; produção seta 3 explicitamente
+		MaxAckPending:       1000,
+		TopicMaxAge:         time.Hour,
 	}
 }
 
@@ -122,6 +142,9 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envOr("GQ_METRICS_ADDR", ""), "Endereço separado para /metrics (vazio = mesmo que --addr)")
 	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", envDurationOr("GQ_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout), "Timeout para shutdown gracioso")
 	fs.Int64Var(&cfg.MaxRequestBodyBytes, "max-body-bytes", envInt64Or("GQ_MAX_BODY_BYTES", cfg.MaxRequestBodyBytes), "Tamanho máximo do body (bytes)")
+	fs.IntVar(&cfg.StreamReplicas, "stream-replicas", envIntOr("GQ_STREAM_REPLICAS", cfg.StreamReplicas), "Réplicas Raft por stream JetStream (1, 3 ou 5; produção = 3)")
+	fs.IntVar(&cfg.MaxAckPending, "max-ack-pending", envIntOr("GQ_MAX_ACK_PENDING", cfg.MaxAckPending), "Máximo de mensagens in-flight por fila")
+	fs.DurationVar(&cfg.TopicMaxAge, "topic-max-age", envDurationOr("GQ_TOPIC_MAX_AGE", cfg.TopicMaxAge), "Retenção do stream de arquivo dos tópicos SNS")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		return Config{}, fmt.Errorf("parse flags: %w", err)
@@ -167,6 +190,22 @@ func (c Config) Validate() error {
 	if c.MaxRequestBodyBytes < 1024 {
 		errs = append(errs, "max-body-bytes deve ser >= 1024")
 	}
+	switch c.StreamReplicas {
+	case 1, 3, 5:
+		// ok — Raft exige quórum ímpar
+	default:
+		errs = append(errs, fmt.Sprintf("stream-replicas deve ser 1, 3 ou 5, recebido %d", c.StreamReplicas))
+	}
+	if c.MaxAckPending < 1 {
+		errs = append(errs, "max-ack-pending deve ser >= 1")
+	}
+	if c.TopicMaxAge <= 0 {
+		errs = append(errs, "topic-max-age deve ser positivo")
+	}
+	if c.IsProduction() && c.StreamReplicas == 1 {
+		// Fail-loud: produção com 1 réplica = perda de dados na queda de 1 nó.
+		errs = append(errs, "auth-mode verify/strict exige stream-replicas >= 3 (HA); use GQ_STREAM_REPLICAS=3")
+	}
 
 	if len(errs) > 0 {
 		return errors.New("configuração inválida: " + strings.Join(errs, "; "))
@@ -192,6 +231,16 @@ func envDurationOr(key string, fallback time.Duration) time.Duration {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+func envIntOr(key string, fallback int) int {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
 		}
 	}
 	return fallback
