@@ -37,7 +37,7 @@ func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, 
 	q, err := s.handlers.SQS.CreateQueue(r.Context(), cqp)
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		observability.ObserveHTTP("sqs", string(protocol.ActionCreateQueue), httpStatusLabel(awsErr), 0)
 		return
 	}
@@ -49,7 +49,7 @@ func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, 
 			XMLName  xml.Name `xml:"CreateQueueResult"`
 			QueueURL string   `xml:"QueueUrl"`
 		}{QueueURL: q.URL},
-		newRequestID())
+		requestFromContext(r))
 }
 
 // handleCreateQueueJSON implementa CreateQueue via protocolo JSON 1.0 (JSON response).
@@ -58,7 +58,7 @@ func (s *Server) handleCreateQueueJSON(w http.ResponseWriter, r *http.Request, p
 	q, err := s.handlers.SQS.CreateQueue(r.Context(), cqp)
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -79,7 +79,7 @@ func (s *Server) handleGetQueueUrlQuery(w http.ResponseWriter, r *http.Request, 
 	q, err := s.handlers.SQS.GetQueueUrl(r.Context(), sqs.GetQueueUrlParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -99,7 +99,7 @@ func (s *Server) handleGetQueueUrlQuery(w http.ResponseWriter, r *http.Request, 
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Result:   result{QueueURL: q.URL},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -113,7 +113,7 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 	attrs, err := s.handlers.SQS.GetQueueAttributes(r.Context(), sqs.GetQueueAttributesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -149,7 +149,7 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Result:   result{Attribute: attrList},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -163,7 +163,7 @@ func (s *Server) handleListQueuesQuery(w http.ResponseWriter, r *http.Request, p
 	res, err := s.handlers.SQS.ListQueues(r.Context(), sqs.ListQueuesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -183,7 +183,7 @@ func (s *Server) handleListQueuesQuery(w http.ResponseWriter, r *http.Request, p
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Result:   result{QueueURL: res.QueueUrls},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -197,7 +197,7 @@ func (s *Server) handleDeleteQueueQuery(w http.ResponseWriter, r *http.Request, 
 	err := s.handlers.SQS.DeleteQueue(r.Context(), sqs.DeleteQueueParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -210,7 +210,7 @@ func (s *Server) handleDeleteQueueQuery(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusOK)
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -225,7 +225,7 @@ func (s *Server) handleGetQueueUrlJSON(w http.ResponseWriter, r *http.Request, p
 	q, err := s.handlers.SQS.GetQueueUrl(r.Context(), sqs.GetQueueUrlParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -237,7 +237,7 @@ func (s *Server) handleGetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	attrs, err := s.handlers.SQS.GetQueueAttributes(r.Context(), sqs.GetQueueAttributesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	// AWS JSON 1.0 GetQueueAttributes devolve {"Attributes": {"name": "value", ...}}
@@ -252,7 +252,7 @@ func (s *Server) handleListQueuesJSON(w http.ResponseWriter, r *http.Request, pa
 	res, err := s.handlers.SQS.ListQueues(r.Context(), sqs.ListQueuesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -266,7 +266,7 @@ func (s *Server) handleDeleteQueueJSON(w http.ResponseWriter, r *http.Request, p
 	err := s.handlers.SQS.DeleteQueue(r.Context(), sqs.DeleteQueueParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -281,7 +281,7 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 	res, err := s.handlers.SQS.SendMessage(r.Context(), sqs.SendMessageParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -307,7 +307,7 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 			MD5OfBody:  res.MD5OfBody,
 			SequenceNo: res.SequenceNo,
 		},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -320,7 +320,7 @@ func (s *Server) handleSendMessageJSON(w http.ResponseWriter, r *http.Request, p
 	res, err := s.handlers.SQS.SendMessage(r.Context(), sqs.SendMessageParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -338,7 +338,7 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 	res, err := s.handlers.SQS.ReceiveMessage(r.Context(), sqs.ReceiveMessageParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -411,7 +411,7 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Result:   result{Message: out},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -424,7 +424,7 @@ func (s *Server) handleReceiveMessageJSON(w http.ResponseWriter, r *http.Request
 	res, err := s.handlers.SQS.ReceiveMessage(r.Context(), sqs.ReceiveMessageParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 
@@ -467,7 +467,7 @@ func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request
 	err := s.handlers.SQS.DeleteMessage(r.Context(), sqs.DeleteMessageParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	type response struct {
@@ -479,7 +479,7 @@ func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusOK)
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -492,7 +492,7 @@ func (s *Server) handleDeleteMessageJSON(w http.ResponseWriter, r *http.Request,
 	err := s.handlers.SQS.DeleteMessage(r.Context(), sqs.DeleteMessageParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -506,7 +506,7 @@ func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *ht
 	err := s.handlers.SQS.ChangeMessageVisibility(r.Context(), sqs.ChangeMessageVisibilityParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	type response struct {
@@ -518,7 +518,7 @@ func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusOK)
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -531,7 +531,7 @@ func (s *Server) handleChangeMessageVisibilityJSON(w http.ResponseWriter, r *htt
 	err := s.handlers.SQS.ChangeMessageVisibility(r.Context(), sqs.ChangeMessageVisibilityParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -545,7 +545,7 @@ func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, p
 	err := s.handlers.SQS.PurgeQueue(r.Context(), sqs.PurgeQueueParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	type response struct {
@@ -557,7 +557,7 @@ func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, p
 	w.WriteHeader(http.StatusOK)
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -570,7 +570,7 @@ func (s *Server) handlePurgeQueueJSON(w http.ResponseWriter, r *http.Request, pa
 	err := s.handlers.SQS.PurgeQueue(r.Context(), sqs.PurgeQueueParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -584,7 +584,7 @@ func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 	err := s.handlers.SQS.SetQueueAttributes(r.Context(), sqs.SetQueueAttributesParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	type response struct {
@@ -596,7 +596,7 @@ func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusOK)
 	resp := response{
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
@@ -609,7 +609,7 @@ func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	err := s.handlers.SQS.SetQueueAttributes(r.Context(), sqs.SetQueueAttributesParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -656,7 +656,7 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -668,7 +668,7 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 			Successful: make([]sendMessageBatchResultEntryQuery, 0, len(result.Successful)),
 			Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
 		},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	for _, e := range result.Successful {
 		resp.Result.Successful = append(resp.Result.Successful, sendMessageBatchResultEntryQuery{
@@ -719,7 +719,7 @@ func (s *Server) handleSendMessageBatchJSON(w http.ResponseWriter, r *http.Reque
 	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
@@ -773,7 +773,7 @@ func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Re
 	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromQuery(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -785,7 +785,7 @@ func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Re
 			Successful: make([]deleteMessageBatchResultEntryQuery, 0, len(result.Successful)),
 			Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
 		},
-		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
 	}
 	for _, e := range result.Successful {
 		resp.Result.Successful = append(resp.Result.Successful, deleteMessageBatchResultEntryQuery{Id: e.Id})
@@ -819,7 +819,7 @@ func (s *Server) handleDeleteMessageBatchJSON(w http.ResponseWriter, r *http.Req
 	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromJSON(params))
 	if err != nil {
 		awsErr := sqs.AsAWSError(err)
-		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, newRequestID())
+		writeFatalError(w, transportSQSJSON, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")

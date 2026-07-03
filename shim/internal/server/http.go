@@ -163,7 +163,7 @@ func (s *Server) handleAWSJSONDispatch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAWSQueryDispatch(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxBodyBytes))
 	if err != nil {
-		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", "falha ao ler body: "+err.Error(), newRequestID())
+		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", "falha ao ler body: "+err.Error(), requestFromContext(r))
 		return
 	}
 	_ = r.Body.Close()
@@ -172,7 +172,7 @@ func (s *Server) handleAWSQueryDispatch(w http.ResponseWriter, r *http.Request) 
 	// Discrimina SQS vs SNS pelo `Action` value (única forma em Query).
 	vals, perr := url.ParseQuery(string(body))
 	if perr != nil {
-		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", "falha ao parsear body: "+perr.Error(), newRequestID())
+		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", "falha ao parsear body: "+perr.Error(), requestFromContext(r))
 		return
 	}
 	if isSNSAction(protocol.Action(vals.Get("Action"))) {
@@ -205,7 +205,7 @@ func isSNSAction(action protocol.Action) bool {
 func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 	action, params, err := protocol.ParseSQSQueryRequest(r)
 	if err != nil {
-		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", err.Error(), newRequestID())
+		writeFatalError(w, transportSQSQuery, "InvalidParameterValue", err.Error(), requestFromContext(r))
 		return
 	}
 
@@ -238,7 +238,7 @@ func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 		s.handleDeleteMessageBatchQuery(w, r, params)
 	default:
 		writeFatalError(w, transportSQSQuery, "UnsupportedOperation",
-			fmt.Sprintf("Action %q ainda não implementada", action), newRequestID())
+			fmt.Sprintf("Action %q ainda não implementada", action), requestFromContext(r))
 	}
 }
 
@@ -246,7 +246,7 @@ func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 	action, params, err := protocol.ParseSQSJSONRequest(r)
 	if err != nil {
-		writeFatalError(w, transportSQSJSON, "InvalidParameterValue", err.Error(), newRequestID())
+		writeFatalError(w, transportSQSJSON, "InvalidParameterValue", err.Error(), requestFromContext(r))
 		return
 	}
 
@@ -279,7 +279,7 @@ func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 		s.handleDeleteMessageBatchJSON(w, r, params)
 	default:
 		writeFatalError(w, transportSQSJSON, "UnsupportedOperation",
-			fmt.Sprintf("Action %q ainda não implementada", action), newRequestID())
+			fmt.Sprintf("Action %q ainda não implementada", action), requestFromContext(r))
 	}
 }
 
@@ -331,6 +331,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 // Detectado por detectTransport que usa internamente.
 
 // newRequestID gera um request ID único estilo AWS (hex 16 chars).
+//
+// ATENÇÃO (refactor/kiss-dry-pass-2 Commit 3): callers devem preferir
+// requestFromContext(r) — gera ID consistente com X-Request-ID header
+// exposto pelo middleware. newRequestID() direto causa divergência entre
+// o ID no header e o ID no body XML. Mantido aqui por fallback
+// (handlers fora do chi stack — só em tests).
 func newRequestID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -338,6 +344,21 @@ func newRequestID() string {
 		return fmt.Sprintf("req-%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// requestFromContext retorna o request ID armazenado pelo middleware
+// (em r.Context()), ou gera novo se o handler foi invocado fora do
+// chi stack (testes, recovery mid-pipeline).
+//
+// USO: handlers devem chamar requestFromContext(r) em vez de newRequestID()
+// direto. Garante que X-Request-ID header (definido pelo middleware) E
+// <RequestId> no body XML (escrito pelo handler) sejam o MESMO ID —
+// correlação de logs e audit funciona corretamente.
+func requestFromContext(r *http.Request) string {
+	if id := requestIDFromCtx(r.Context()); id != "" {
+		return id
+	}
+	return newRequestID()
 }
 
 // --- SNS handlers ---

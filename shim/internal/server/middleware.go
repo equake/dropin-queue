@@ -20,6 +20,7 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", id)
 		ctx := withRequestID(r.Context(), id)
+		_ = ctx
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -118,14 +119,27 @@ type contextKey string
 
 const requestIDKey contextKey = "request_id"
 
+// withRequestID injeta o request ID no context. Usado pelo
+// requestIDMiddleware para que handlers possam recuperá-lo via
+// requestIDFromCtx.
+//
+// Pré-fix (refactor/kiss-dry-pass-2 Commit 3): a função usava
+// `type k struct{ name contextKey }` definida inline AQUI, e
+// requestIDFromCtx usava OUTRO struct inline. Como Go trata structs
+// de scopes diferentes como tipos distintos, ctx.Value sempre
+// retornava nil — requestIDFromCtx nunca encontrava o valor setado
+// pelo middleware. Resultado: log middleware via requestIDFromCtx
+// (e, agora, handlers via requestFromContext) caíam no fallback
+// newRequestID(), gerando IDs DIFERENTES do que o middleware
+// atribuiu (divergência no audit log e no response body).
+//
+// Pós-fix: ambos usam a mesma contextKey diretamente.
 func withRequestID(parent context.Context, id string) context.Context {
-	type k struct{ name contextKey }
-	return context.WithValue(parent, k{requestIDKey}, id)
+	return context.WithValue(parent, requestIDKey, id)
 }
 
 func requestIDFromCtx(ctx context.Context) string {
-	type k struct{ name contextKey }
-	if v, ok := ctx.Value(k{requestIDKey}).(string); ok {
+	if v, ok := ctx.Value(requestIDKey).(string); ok {
 		return v
 	}
 	return ""
