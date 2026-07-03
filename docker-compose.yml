@@ -1,0 +1,98 @@
+# docker-compose.yml — stack dev local
+#
+# Sobe o ambiente mínimo para testar o shim:
+#   - nats:    NATS JetStream em modo single-node (sem cluster para dev)
+#   - minio:   Object storage S3-compatible para JetStream file storage (futuro)
+#   - shim:    Build do shimd localmente, conectado ao nats
+#
+# Uso:
+#   docker compose up -d       # sobe tudo
+#   make smoke                 # roda smoke test (boto3 cria fila)
+#   docker compose logs -f shim
+#   docker compose down        # derruba
+#   docker compose down -v     # remove volumes também
+
+name: generic-queue-dev
+
+services:
+  # --- NATS JetStream ---
+  nats:
+    image: nats:2.10-alpine
+    container_name: gq-nats
+    command: ["nats-server", "-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"   # client traffic
+      - "8222:8222"   # HTTP monitoring (http://localhost:8222)
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - gq-net
+
+  # --- MinIO (S3-compatible object storage) ---
+  # Por enquanto apenas provisionado para uso futuro com JetStream
+  # File Storage snapshots. O shim não usa ainda.
+  minio:
+    image: minio/minio:latest
+    container_name: gq-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # console web
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - gq-net
+
+  # --- Shimd (AWS API) ---
+  shim:
+    build:
+      context: .
+      dockerfile: shim/Dockerfile
+      args:
+        VERSION: dev-local
+    container_name: gq-shim
+    depends_on:
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      GQ_ADDR: ":4566"
+      GQ_NATS_URL: "nats://nats:4222"
+      GQ_ACCOUNT_ID: "000000000000"
+      GQ_REGION: "us-east-1"
+      GQ_AUTH_MODE: "off"           # dev only — produção usa strict
+      GQ_LOG_LEVEL: "info"
+      GQ_SHUTDOWN_TIMEOUT: "10s"
+    ports:
+      - "4566:4566"
+    networks:
+      - gq-net
+    # Healthcheck: usa python (instalado no builder, não no runtime)
+    # Para healthcheck em produção, configure via orchestrator (k8s/docker)
+    # apontando para /healthz e /readyz.
+
+networks:
+  gq-net:
+    driver: bridge
+
+volumes:
+  nats-data:
+    driver: local
+  minio-data:
+    driver: local
