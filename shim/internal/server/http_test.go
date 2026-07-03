@@ -77,7 +77,7 @@ func TestWriteSQSFatalError(t *testing.T) {
 	for _, tc := range tests {
 		var buf bytes.Buffer
 		rec := httptest.NewRecorder()
-		writeSQSFatalError(rec, tc.code, "test message", "req-abc")
+		writeFatalError(rec, transportSQSQuery, tc.code, "test message", "req-abc")
 
 		if rec.Code != tc.status {
 			t.Errorf("%s: status got %d, want %d", tc.code, rec.Code, tc.status)

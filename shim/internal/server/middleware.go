@@ -35,9 +35,9 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 					"method", r.Method,
 				)
 				if rec2, ok := rec.(error); ok {
-					writeSQSFatalError(w, "InternalError", rec2.Error(), requestIDFromCtx(r.Context()))
+					writeFatalError(w, transportSQSQuery, "InternalError", rec2.Error(), requestIDFromCtx(r.Context()))
 				} else {
-					writeSQSFatalError(w, "InternalError",
+					writeFatalError(w, transportSQSQuery, "InternalError",
 						"internal server error",
 						requestIDFromCtx(r.Context()),
 					)
