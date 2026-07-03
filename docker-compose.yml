@@ -17,7 +17,7 @@ name: dropin-queue-dev
 services:
   # --- NATS JetStream ---
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.14.3-alpine
     container_name: dq-nats
     command: ["nats-server", "-js", "-sd", "/data", "-m", "8222"]
     ports:

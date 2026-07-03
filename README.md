@@ -135,7 +135,7 @@ NATS JetStream 2.10 + MinIO.
 
 ### Pré-requisitos
 
-- Go 1.22+
+- Go 1.26+
 - Docker 24+ e Docker Compose v2+
 - Python 3.10+ (para testes de integração com boto3)
 - Make (opcional)

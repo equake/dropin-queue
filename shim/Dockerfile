@@ -1,14 +1,14 @@
 # Dockerfile para o dropin-server (clone de SNS/SQS).
 #
 # Multi-stage build:
-#   1. Builder: compila dropin-server com Go 1.25
+#   1. Builder: compila dropin-server com Go 1.26
 #   2. Runtime: scratch + ca-certs + tzdata (mínimo absoluto, distroless-like)
 #
 # Tamanho esperado do runtime: ~15 MB (binário estático).
 # Não inclui o broker (rodando em container separado via docker-compose).
 
 # --- Stage 1: builder ---
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Versão injetada via build-arg para -ldflags.
 ARG VERSION=dev
