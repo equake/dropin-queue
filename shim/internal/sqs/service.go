@@ -115,6 +115,10 @@ func (CreateQueueResult) actionResultTag() string { return "" } // handled by en
 
 // CreateQueue implementa a operação CreateQueue.
 //
+// Aceita parâmetros vindos do protocolo Query (form-encoded) ou JSON 1.0.
+// O parâmetro `params` é um CreateQueueParams já normalizado (built pelo
+// servidor ao detectar o protocolo); a camada service não conhece o wire format.
+//
 // Comportamento AWS:
 //   - Se fila existe com mesmos atributos → idempotente, devolve a URL.
 //   - Se fila existe com atributos diferentes → QueueAlreadyExists.
@@ -124,28 +128,43 @@ func (CreateQueueResult) actionResultTag() string { return "" } // handled by en
 //   - QueueName: 1-80 chars, alfanuméricos + . _ -
 //   - Atributos: nomes conhecidos, valores em range
 //   - FIFO suffix .fifo se Attributes.FifoQueue=true
-func (s *Service) CreateQueue(ctx context.Context, params url.Values) (*types.Queue, error) {
+func (s *Service) CreateQueue(ctx context.Context, params *CreateQueueParams) (*types.Queue, error) {
 	start := s.agora()
 
-	p, err := parseCreateQueueParams(params)
-	if err != nil {
-		return nil, err
+	if params == nil {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "params não pode ser nil",
+		}
+	}
+
+	if params.QueueName == "" {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueName é obrigatório",
+		}
+	}
+	if !isValidQueueName(params.QueueName) {
+		return nil, &AWSError{
+			Code:    ErrCodeInvalidParameterValue,
+			Message: fmt.Sprintf("QueueName inválido: %q (1-80 chars, alfanuméricos, -, _, .)", params.QueueName),
+		}
 	}
 
 	q := types.Queue{
-		Name:      p.QueueName,
+		Name:      params.QueueName,
 		AccountID: s.accountID,
 		Region:    s.region,
 		Attributes: types.QueueAttributes{
-			VisibilityTimeout:            parseInt32Default(p.Attributes["VisibilityTimeout"], types.DefaultQueueAttributes().VisibilityTimeout),
-			MessageRetentionPeriod:       parseInt32Default(p.Attributes["MessageRetentionPeriod"], types.DefaultQueueAttributes().MessageRetentionPeriod),
-			MaximumMessageSize:           parseInt32Default(p.Attributes["MaximumMessageSize"], types.DefaultQueueAttributes().MaximumMessageSize),
-			DelaySeconds:                 parseInt32Default(p.Attributes["DelaySeconds"], types.DefaultQueueAttributes().DelaySeconds),
-			ReceiveMessageWaitTimeSeconds: parseInt32Default(p.Attributes["ReceiveMessageWaitTimeSeconds"], types.DefaultQueueAttributes().ReceiveMessageWaitTimeSeconds),
-			ContentBasedDeduplication:    p.Attributes["ContentBasedDeduplication"] == "true",
+			VisibilityTimeout:            parseInt32Default(params.Attributes["VisibilityTimeout"], types.DefaultQueueAttributes().VisibilityTimeout),
+			MessageRetentionPeriod:       parseInt32Default(params.Attributes["MessageRetentionPeriod"], types.DefaultQueueAttributes().MessageRetentionPeriod),
+			MaximumMessageSize:           parseInt32Default(params.Attributes["MaximumMessageSize"], types.DefaultQueueAttributes().MaximumMessageSize),
+			DelaySeconds:                 parseInt32Default(params.Attributes["DelaySeconds"], types.DefaultQueueAttributes().DelaySeconds),
+			ReceiveMessageWaitTimeSeconds: parseInt32Default(params.Attributes["ReceiveMessageWaitTimeSeconds"], types.DefaultQueueAttributes().ReceiveMessageWaitTimeSeconds),
+			ContentBasedDeduplication:    params.Attributes["ContentBasedDeduplication"] == "true",
 		},
-		Tags:    p.Tags,
-		FIFO:    strings.HasSuffix(p.QueueName, ".fifo") || p.Attributes["FifoQueue"] == "true",
+		Tags:      params.Tags,
+		FIFO:      strings.HasSuffix(params.QueueName, ".fifo") || params.Attributes["FifoQueue"] == "true",
 		CreatedAt: s.agora(),
 	}
 
@@ -176,27 +195,297 @@ func (s *Service) CreateQueue(ctx context.Context, params url.Values) (*types.Qu
 	return created, nil
 }
 
-// parseCreateQueueParams extrai e valida os parâmetros de CreateQueue.
-func parseCreateQueueParams(params url.Values) (*CreateQueueParams, error) {
-	p := &CreateQueueParams{
+// CreateQueueParamsFromQuery normaliza parâmetros vindos do protocolo Query
+// (form-encoded) para CreateQueueParams.
+//
+// Espera url.Values com chaves:
+//   - "QueueName" → QueueName
+//   - "Attribute.N.Name" + "Attribute.N.Value" → Attributes
+//   - "Tag.N.Name" + "Tag.N.Value" → Tags
+func CreateQueueParamsFromQuery(params url.Values) *CreateQueueParams {
+	return &CreateQueueParams{
 		QueueName:  params.Get("QueueName"),
 		Attributes: extractAttributes(params, "Attribute"),
 		Tags:       extractAttributes(params, "Tag"),
 	}
+}
 
-	if p.QueueName == "" {
+// CreateQueueParamsFromJSON normaliza parâmetros vindos do protocolo JSON 1.0
+// para CreateQueueParams.
+//
+// Aceita ambos formatos AWS JSON 1.0:
+//   - Documentado: "Attribute": [{"Name":"VisibilityTimeout","Value":"30"}]
+//   - Compacto boto3: "Attributes": {"VisibilityTimeout": "30"}
+//
+// Mesma coisa para Tag/Tags.
+func CreateQueueParamsFromJSON(params map[string]any) *CreateQueueParams {
+	p := &CreateQueueParams{}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	p.Attributes = protocol.ExtractJSONAttributes(params, "Attribute", "Name")
+	p.Tags = protocol.ExtractJSONAttributes(params, "Tag", "Key")
+	return p
+}
+
+// --- GetQueueUrl ---
+
+// GetQueueUrlParams contém os parâmetros de GetQueueUrl.
+type GetQueueUrlParams struct {
+	QueueName string
+}
+
+// GetQueueUrl devolve a URL canônica de uma fila pelo nome.
+//
+// Comportamento AWS:
+//   - QueueName é obrigatório.
+//   - QueueDoesNotExist se não existir.
+//   - Caso exista, devolve URL no formato '<endpoint>/<account>/<name>'.
+func (s *Service) GetQueueUrl(ctx context.Context, params *GetQueueUrlParams) (*types.Queue, error) {
+	if params == nil || params.QueueName == "" {
 		return nil, &AWSError{
 			Code:    ErrCodeMissingParameter,
 			Message: "QueueName é obrigatório",
 		}
 	}
-	if !isValidQueueName(p.QueueName) {
+
+	q, err := s.storage.Queues().GetQueue(ctx, params.QueueName)
+	if err != nil {
+		return nil, err // AsAWSError will translate ErrQueueNotFound
+	}
+	q.URL = protocol.NewQueueURL(s.endpointURL, s.accountID, q.Name).String()
+	q.ARN = protocol.NewSQSARN(s.region, s.accountID, q.Name).String()
+	return q, nil
+}
+
+// GetQueueUrlParamsFromQuery normaliza parâmetros Query para GetQueueUrl.
+func GetQueueUrlParamsFromQuery(params url.Values) *GetQueueUrlParams {
+	return &GetQueueUrlParams{
+		QueueName: params.Get("QueueName"),
+	}
+}
+
+// GetQueueUrlParamsFromJSON normaliza parâmetros JSON para GetQueueUrl.
+func GetQueueUrlParamsFromJSON(params map[string]any) *GetQueueUrlParams {
+	p := &GetQueueUrlParams{}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	return p
+}
+
+// --- GetQueueAttributes ---
+
+// GetQueueAttributesParams contém os parâmetros de GetQueueAttributes.
+type GetQueueAttributesParams struct {
+	QueueName       string
+	AttributeNames  []string // ["All"] ou lista de nomes específicos
+}
+
+// GetQueueAttributes devolve os atributos de uma fila.
+//
+// Se AttributeNames contém "All" ou está vazia, devolve todos os atributos
+// suportados. Caso contrário, filtra pelos nomes fornecidos.
+func (s *Service) GetQueueAttributes(ctx context.Context, params *GetQueueAttributesParams) (map[string]string, error) {
+	if params == nil || params.QueueName == "" {
 		return nil, &AWSError{
-			Code:    ErrCodeInvalidParameterValue,
-			Message: fmt.Sprintf("QueueName inválido: %q (1-80 chars, alfanuméricos, -, _, .)", p.QueueName),
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueName é obrigatório",
 		}
 	}
-	return p, nil
+
+	q, err := s.storage.Queues().GetQueue(ctx, params.QueueName)
+	if err != nil {
+		return nil, err
+	}
+
+	allAttrs := map[string]string{
+		"VisibilityTimeout":            fmt.Sprintf("%d", q.Attributes.VisibilityTimeout),
+		"MessageRetentionPeriod":       fmt.Sprintf("%d", q.Attributes.MessageRetentionPeriod),
+		"MaximumMessageSize":           fmt.Sprintf("%d", q.Attributes.MaximumMessageSize),
+		"DelaySeconds":                 fmt.Sprintf("%d", q.Attributes.DelaySeconds),
+		"ReceiveMessageWaitTimeSeconds": fmt.Sprintf("%d", q.Attributes.ReceiveMessageWaitTimeSeconds),
+		"QueueArn":                     protocol.NewSQSARN(s.region, s.accountID, q.Name).String(),
+		"ApproximateNumberOfMessages":  "0", // TODO Semana 3: usar QueueDepth
+		"ApproximateNumberOfMessagesNotVisible": "0",
+		"CreatedTimestamp":             fmt.Sprintf("%d", q.CreatedAt.UnixMilli()),
+	}
+
+	// "All" ou vazio → tudo.
+	wantAll := len(params.AttributeNames) == 0
+	for _, n := range params.AttributeNames {
+		if n == "All" {
+			wantAll = true
+			break
+		}
+	}
+	if wantAll {
+		return allAttrs, nil
+	}
+
+	// Filtra pelos nomes pedidos.
+	out := make(map[string]string)
+	for _, n := range params.AttributeNames {
+		if v, ok := allAttrs[n]; ok {
+			out[n] = v
+		} else {
+			// AWS devolve silenciosamente atributos não-conhecidos; ok.
+		}
+	}
+	return out, nil
+}
+
+// GetQueueAttributesParamsFromQuery normaliza Query → GetQueueAttributesParams.
+func GetQueueAttributesParamsFromQuery(params url.Values) *GetQueueAttributesParams {
+	p := &GetQueueAttributesParams{
+		QueueName: params.Get("QueueName"),
+	}
+	// AttributeName.1, AttributeName.2, etc.
+	for i := 1; ; i++ {
+		key := fmt.Sprintf("AttributeName.%d", i)
+		v, ok := params[key]
+		if !ok || len(v) == 0 {
+			break
+		}
+		p.AttributeNames = append(p.AttributeNames, v[0])
+	}
+	return p
+}
+
+// GetQueueAttributesParamsFromJSON normaliza JSON → GetQueueAttributesParams.
+//
+// boto3 envia QueueUrl (não QueueName) para GetQueueAttributes no JSON 1.0.
+// Extraímos o nome do path da URL.
+func GetQueueAttributesParamsFromJSON(params map[string]any) *GetQueueAttributesParams {
+	p := &GetQueueAttributesParams{}
+	if s, ok := params["QueueName"].(string); ok && s != "" {
+		p.QueueName = s
+	} else if s, ok := params["QueueUrl"].(string); ok && s != "" {
+		p.QueueName = queueNameFromURL(s)
+	}
+	if raw, ok := params["AttributeName"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					p.AttributeNames = append(p.AttributeNames, s)
+				}
+			}
+		}
+	}
+	return p
+}
+
+// --- ListQueues ---
+
+// ListQueuesParams contém os parâmetros de ListQueues.
+type ListQueuesParams struct {
+	QueueNamePrefix string
+	MaxResults      int32
+	NextToken       string
+}
+
+// ListQueuesResult é o resultado de ListQueues.
+type ListQueuesResult struct {
+	QueueUrls []string
+	NextToken string
+}
+
+// ListQueues lista filas, opcionalmente filtradas por prefixo.
+func (s *Service) ListQueues(ctx context.Context, params *ListQueuesParams) (*ListQueuesResult, error) {
+	if params == nil {
+		params = &ListQueuesParams{}
+	}
+
+	queues, err := s.storage.Queues().ListQueues(ctx, params.QueueNamePrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	urls := make([]string, 0, len(queues))
+	for _, q := range queues {
+		q.URL = protocol.NewQueueURL(s.endpointURL, s.accountID, q.Name).String()
+		urls = append(urls, q.URL)
+	}
+
+	// TODO: pagination com NextToken (Semana 3).
+	return &ListQueuesResult{
+		QueueUrls: urls,
+	}, nil
+}
+
+// ListQueuesParamsFromQuery normaliza Query → ListQueuesParams.
+func ListQueuesParamsFromQuery(params url.Values) *ListQueuesParams {
+	return &ListQueuesParams{
+		QueueNamePrefix: params.Get("QueueNamePrefix"),
+		MaxResults:      parseInt32Default(params.Get("MaxResults"), 0),
+		NextToken:       params.Get("NextToken"),
+	}
+}
+
+// ListQueuesParamsFromJSON normaliza JSON → ListQueuesParams.
+func ListQueuesParamsFromJSON(params map[string]any) *ListQueuesParams {
+	p := &ListQueuesParams{}
+	if s, ok := params["QueueNamePrefix"].(string); ok {
+		p.QueueNamePrefix = s
+	}
+	if s, ok := params["NextToken"].(string); ok {
+		p.NextToken = s
+	}
+	if f, ok := params["MaxResults"].(float64); ok {
+		p.MaxResults = int32(f)
+	}
+	return p
+}
+
+// --- DeleteQueue ---
+
+// DeleteQueueParams contém os parâmetros de DeleteQueue.
+type DeleteQueueParams struct {
+	QueueName string // pode vir como nome ou como QueueUrl; o server extrai
+}
+
+// DeleteQueue remove uma fila. Idempotente: não retorna erro se não existe.
+func (s *Service) DeleteQueue(ctx context.Context, params *DeleteQueueParams) error {
+	if params == nil || params.QueueName == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueName ou QueueUrl é obrigatório",
+		}
+	}
+	return s.storage.Queues().DeleteQueue(ctx, params.QueueName)
+}
+
+// queueNameFromURL extrai o nome da fila da QueueURL.
+//
+// Formato: http(s)://endpoint/<account>/<name>
+// Nome é o último segmento do path.
+func queueNameFromURL(queueURL string) string {
+	idx := strings.LastIndex(queueURL, "/")
+	if idx < 0 || idx == len(queueURL)-1 {
+		return queueURL
+	}
+	return queueURL[idx+1:]
+}
+
+// DeleteQueueParamsFromQuery normaliza Query → DeleteQueueParams.
+// Aceita QueueName OU QueueUrl (o AWS aceita ambos).
+func DeleteQueueParamsFromQuery(params url.Values) *DeleteQueueParams {
+	name := params.Get("QueueName")
+	if name == "" {
+		name = queueNameFromURL(params.Get("QueueUrl"))
+	}
+	return &DeleteQueueParams{QueueName: name}
+}
+
+// DeleteQueueParamsFromJSON normaliza JSON → DeleteQueueParams.
+func DeleteQueueParamsFromJSON(params map[string]any) *DeleteQueueParams {
+	p := &DeleteQueueParams{}
+	if s, ok := params["QueueName"].(string); ok && s != "" {
+		p.QueueName = s
+	} else if s, ok := params["QueueUrl"].(string); ok && s != "" {
+		p.QueueName = queueNameFromURL(s)
+	}
+	return p
 }
 
 // extractAttributes extrai pares N.Name=..., N.Value=... das form values.

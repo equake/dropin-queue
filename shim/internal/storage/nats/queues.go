@@ -80,6 +80,10 @@ func sanitizeStreamName(s string) string {
 //
 // Comportamento idempotente: se já existe stream com mesmo nome (após
 // sanitização), devolve a fila existente em vez de erro (igual SQS).
+//
+// Além do stream, persiste metadados em KV bucket (queue_meta) para que
+// atributos como VisibilityTimeout sobrevivam ao restart e sejam
+// recuperáveis via GetQueue.
 func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, error) {
 	start := time.Now()
 	defer func() { observability.ObserveStorage("create_queue", nil, time.Since(start)) }()
@@ -98,6 +102,17 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 			q2 := q
 			q2.CreatedAt = existing.CachedInfo().Created
 			c.cacheStream(cfg.Name, existing)
+			// Tenta carregar metadata existente (pode não ter sido gravada em versão antiga).
+			if md, merr := c.loadQueueMetadata(ctx, q.Name); merr == nil {
+				q2.Attributes.VisibilityTimeout = md.Attributes["VisibilityTimeout"]
+				q2.Attributes.MessageRetentionPeriod = md.Attributes["MessageRetentionPeriod"]
+				q2.Attributes.MaximumMessageSize = md.Attributes["MaximumMessageSize"]
+				q2.Attributes.DelaySeconds = md.Attributes["DelaySeconds"]
+				q2.Attributes.ReceiveMessageWaitTimeSeconds = md.Attributes["ReceiveMessageWaitTimeSeconds"]
+				q2.Attributes.ContentBasedDeduplication = md.Attributes["ContentBasedDeduplication"] == 1
+				q2.FIFO = md.FIFO
+				q2.Tags = md.Tags
+			}
 			return &q2, nil
 		}
 		observability.ObserveStorage("create_queue", err, time.Since(start))
@@ -106,6 +121,14 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 
 	c.cacheStream(cfg.Name, s)
 	q.CreatedAt = s.CachedInfo().Created
+
+	// Persiste metadados no KV bucket (best-effort — não falhamos o
+	// CreateQueue se KV falhar; stream já foi criado).
+	if err := c.saveQueueMetadata(ctx, q); err != nil {
+		observability.L().Warn("falha ao persistir metadata KV",
+			"queue", q.Name, "err", err.Error())
+	}
+
 	observability.L().Info("fila criada",
 		"name", q.Name,
 		"stream", cfg.Name,
@@ -113,31 +136,6 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 	)
 	return &q, nil
 }
-
-// GetQueue busca uma fila existente.
-func (c *Client) GetQueue(ctx context.Context, name string) (*types.Queue, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("get_queue", nil, time.Since(start)) }()
-
-	streamName := "queue-" + sanitizeStreamName(name)
-	s, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
-			return nil, storage.ErrQueueNotFound
-		}
-		return nil, fmt.Errorf("get stream: %w", err)
-	}
-	c.cacheStream(streamName, s)
-
-	info := s.CachedInfo()
-	q := &types.Queue{
-		Name:      name,
-		Attributes: types.DefaultQueueAttributes(),
-		CreatedAt: info.Created,
-	}
-	return q, nil
-}
-
 // ListQueues lista todas as filas, opcionalmente filtradas por prefixo.
 func (c *Client) ListQueues(ctx context.Context, prefix string) ([]types.Queue, error) {
 	start := time.Now()
@@ -198,35 +196,6 @@ func (c *Client) PurgeQueue(ctx context.Context, name string) error {
 	if err := s.Purge(ctx); err != nil {
 		return fmt.Errorf("purge: %w", err)
 	}
-	return nil
-}
-
-// SetQueueAttributes atualiza atributos mutáveis (MaxAge via UpdateStream).
-//
-// Apenas MessageRetentionPeriod é suportado nesta implementação mínima.
-// VisibilityTimeout, MaximumMessageSize, etc. são atributos lógicos
-// aplicados pela camada service.
-func (c *Client) SetQueueAttributes(ctx context.Context, name string, attrs types.QueueAttributes) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("set_queue_attrs", nil, time.Since(start)) }()
-
-	streamName := "queue-" + sanitizeStreamName(name)
-	s, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
-			return storage.ErrQueueNotFound
-		}
-		return fmt.Errorf("get stream: %w", err)
-	}
-
-	cfg := s.CachedInfo().Config
-	if attrs.MessageRetentionPeriod > 0 {
-		cfg.MaxAge = time.Duration(attrs.MessageRetentionPeriod) * time.Second
-	}
-	if _, err := c.js.UpdateStream(ctx, cfg); err != nil {
-		return fmt.Errorf("update stream: %w", err)
-	}
-	c.invalidateStream(streamName)
 	return nil
 }
 

@@ -41,11 +41,12 @@ const (
 //
 // Uma instância é segura para uso concorrente — JetStream context é goroutine-safe.
 type Client struct {
-	nc      *nats.Conn
-	js      jetstream.JetStream
-	mu      sync.RWMutex
-	streams map[string]jetstream.Stream // cache de streams para evitar lookups repetidos
-	prefix  string                      // prefixo adicional para multi-tenant (futuro)
+	nc       *nats.Conn
+	js       jetstream.JetStream
+	mu       sync.RWMutex
+	streams  map[string]jetstream.Stream // cache de streams para evitar lookups repetidos
+	prefix   string                     // prefixo adicional para multi-tenant (futuro)
+	kvCache  jetstream.KeyValue         // cache do bucket de metadados (lazy init)
 }
 
 // Options configura a conexão NATS.
