@@ -30,7 +30,7 @@ func ParseSNSQueryRequest(r *http.Request) (Action, url.Values, error) {
 		return "", nil, fmt.Errorf("Content-Type esperado application/x-www-form-urlencoded, recebeu %q", ct)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10 MB cap
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxWireBodyBytes))
 	if err != nil {
 		return "", nil, fmt.Errorf("ler body: %w", err)
 	}

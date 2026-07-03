@@ -84,3 +84,15 @@ def unique_queue_name():
     """Gera nome único por teste para evitar colisões."""
     import uuid
     return f"test-{uuid.uuid4().hex[:12]}"
+
+
+@pytest.fixture
+def sns_client(shim_ready):
+    """Cliente boto3 SNS apontando para o shim."""
+    return boto3.client(
+        "sns",
+        endpoint_url=SHIM_ENDPOINT,
+        region_name=SHIM_REGION,
+        aws_access_key_id=DEV_ACCESS_KEY,
+        aws_secret_access_key=DEV_SECRET_KEY,
+    )

@@ -9,8 +9,11 @@ import (
 	"strings"
 )
 
-// maxJSONBodyBytes limita tamanho de body JSON parseável.
-const maxJSONBodyBytes = 10 << 20 // 10 MB
+// MaxWireBodyBytes limita tamanho de body wire parseável. Defesa em
+// profundidade — server/http.go também aplica cfg.MaxRequestBodyBytes
+// ANTES do Parse. 10 MB cobre SQS+SNS no pior caso (Publish com 256 KiB
+// + envelope + assinatura × alguma margem).
+const MaxWireBodyBytes = 10 << 20
 
 // ParseSQSJSONRequest faz parse de um request SQS no protocolo AWS JSON 1.0.
 //
@@ -51,7 +54,7 @@ func ParseSQSJSONRequest(r *http.Request) (Action, map[string]any, error) {
 		return "", nil, fmt.Errorf("Action SQS inválida em X-Amz-Target: %q", action)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxWireBodyBytes))
 	if err != nil {
 		return "", nil, fmt.Errorf("ler body: %w", err)
 	}

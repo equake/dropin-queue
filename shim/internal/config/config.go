@@ -84,6 +84,12 @@ type Config struct {
 	ShutdownTimeout time.Duration
 
 	// MaxRequestBodyBytes limita tamanho de body aceito (defesa contra DoS).
+	//
+	// 5 MB default: AWS SDK inclui envelope + URL-encoded form (~5% extra)
+	// sobre o tamanho do payload. SQS aceita 256 KiB por mensagem mas o
+	// envelope HTTP ultrapassa isso. 5 MB cobre confortavelmente qualquer
+	// workload SQS/SNS (single message, batch 10x, publish com header).
+	// Ajustável via GQ_MAX_BODY_BYTES.
 	MaxRequestBodyBytes int64
 
 	// StreamReplicas é o número de réplicas Raft de cada stream JetStream
@@ -115,8 +121,8 @@ func Default() Config {
 		LogLevel:            LogLevelInfo,
 		MetricsAddr:         "",
 		ShutdownTimeout:     30 * time.Second,
-		MaxRequestBodyBytes: 262144, // 256 KiB, mesmo que SQS
-		StreamReplicas:      1,      // dev; produção seta 3 explicitamente
+		MaxRequestBodyBytes: 5 << 20, // 5 MB; cobre SQS+SNS no pior caso
+		StreamReplicas:      1,       // dev; produção seta 3 explicitamente
 		MaxAckPending:       1000,
 		TopicMaxAge:         time.Hour,
 	}

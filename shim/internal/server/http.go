@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -53,14 +54,28 @@ type Server struct {
 	addr     string
 	srv      *http.Server
 	router   *chi.Mux
+
+	// maxBodyBytes limita bytes de body por request em roteamento.
+	// Vem de cfg.MaxRequestBodyBytes (default 256 KiB). Antes do
+	// refactor/kiss-dry-pass-1 era literal 1 MB hardcoded em
+	// isSNSQueryRequest.
+	maxBodyBytes int64
 }
 
 // New constrói um Server pronto para ListenAndServe.
-func New(addr string, h *Handlers) *Server {
+//
+// maxBodyBytes limita o tamanho de body aceito (deve bater com
+// cfg.MaxRequestBodyBytes para defesa em profundidade contra oversize).
+// Default 5 MB se não fornecido.
+func New(addr string, h *Handlers, maxBodyBytes int64) *Server {
+	if maxBodyBytes <= 0 {
+		maxBodyBytes = 5 << 20 // 5 MB; cobre SQS+SNS no pior caso
+	}
 	s := &Server{
-		handlers: h,
-		addr:     addr,
-		router:   chi.NewRouter(),
+		handlers:     h,
+		addr:         addr,
+		router:       chi.NewRouter(),
+		maxBodyBytes: maxBodyBytes,
 	}
 	s.routes()
 	s.srv = &http.Server{
@@ -109,65 +124,87 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // --- Handlers ---
 
 // handleAWS é o entrypoint principal para todas as operações AWS.
-// Detecta protocolo (Query vs JSON), parse, dispatch, encode response.
+//
+// Pré-fix (refactor/kiss-dry-pass-1) o roteamento lia o body 1× para
+// detectar SQS vs SNS (sniff), depois parseava dnv no handler — 2 RTTs
+// de parsing por request. Agora lemos o body 1× com limite de
+// cfg.MaxRequestBodyBytes e parseamos direto. Substituímos o body do
+// request por um buffer, e o handler downstream lê desse buffer.
+//
+// Detecção de protocolo:
+//  1. Content-Type = application/x-amz-json-* → JSON path (decide
+//     SQS vs SNS via X-Amz-Target prefix).
+//  2. Senão, ler body. O `Action=` é a única forma de discriminar SQS
+//     vs SNS em Query protocol.
+//
+// Fail-fast: body inválido ou > limite → erro coerente antes de dispatch.
 func (s *Server) handleAWS(w http.ResponseWriter, r *http.Request) {
-	// Detecta serviço (SQS vs SNS) baseado em X-Amz-Target prefix (JSON)
-	// ou namespace do body (Query — não há header, mas SNS usa Action
-	// list própria).
 	if isJSONProtocol(r) {
-		// JSON: usa X-Amz-Target prefix.
-		target := r.Header.Get("X-Amz-Target")
-		if strings.HasPrefix(target, "AmazonSNS.") {
-			s.handleSNSJSON(w, r)
-			return
-		}
-		s.handleAWSJSON(w, r)
+		s.handleAWSJSONDispatch(w, r)
 		return
 	}
-	// Query: precisamos sniff o Action antes de parsear.
-	// Lemos o body pequeno só para identificar (SNS tem Action values distintos).
-	if isSNSQueryRequest(r) {
+	s.handleAWSQueryDispatch(w, r)
+}
+
+// handleAWSJSONDispatch roteia requests JSON 1.0 entre SQS e SNS.
+//
+// O r.Body permanece intocado (cada parser lê o body inteiro uma vez);
+// a única "discriminação" extra é a string X-Amz-Target que já está
+// em headers — sem sniff.
+func (s *Server) handleAWSJSONDispatch(w http.ResponseWriter, r *http.Request) {
+	target := r.Header.Get("X-Amz-Target")
+	if strings.HasPrefix(target, "AmazonSNS.") {
+		s.handleSNSJSON(w, r)
+		return
+	}
+	s.handleAWSJSON(w, r)
+}
+
+// handleAWSQueryDispatch lê o body 1× com limite explícito e roteia
+// Query requests SQS vs SNS.
+//
+// Substitui o pré-fix isSNSQueryRequest que lia 1 MB do body, parseava,
+// e RESTAURAVA o body para o handler reler (desperdício de CPU + memória
+// em cada request, com risco de silent fallback se body > 1 MB).
+func (s *Server) handleAWSQueryDispatch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxBodyBytes))
+	if err != nil {
+		writeSQSFatalError(w, "InvalidParameterValue", "falha ao ler body: "+err.Error(), newRequestID())
+		return
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Discrimina SQS vs SNS pelo `Action` value (única forma em Query).
+	vals, perr := url.ParseQuery(string(body))
+	if perr != nil {
+		writeSQSFatalError(w, "InvalidParameterValue", "falha ao parsear body: "+perr.Error(), newRequestID())
+		return
+	}
+	if isSNSAction(protocol.Action(vals.Get("Action"))) {
 		s.handleSNSQuery(w, r)
 		return
 	}
 	s.handleAWSQuery(w, r)
 }
 
-// isSNSQueryRequest detecta se um request Query é SNS (vs SQS).
+// isSNSAction retorna true se a Action pertence ao set SNS.
 //
-// Estratégia: lê o body (até maxQuerySniffBytes) e checa se Action está no
-// set SNS. O sniff é feito no início do body — Action sempre vem primeiro
-// (boto3 ordena alfabeticamente: Action, ...), então ler o início basta.
-//
-// O body lido é restaurado em r.Body para que o handler posterior possa
-// parseá-lo completamente (Publish com Message grande exige isso).
-const maxQuerySniffBytes = 1 << 20 // 1 MB — maior que max body útil
-
-func isSNSQueryRequest(r *http.Request) bool {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxQuerySniffBytes))
-	if err != nil {
-		return false
-	}
-	_ = r.Body.Close()
-	r.Body = io.NopCloser(strings.NewReader(string(body)))
-
-	vals, err := url.ParseQuery(string(body))
-	if err != nil {
-		return false
-	}
-	action := vals.Get("Action")
-	switch protocol.Action(action) {
+// ListSubscriptionsByTopic NÃO tem Action dedicada no protocolo AWS
+// usado em conjunto com format `entry.N.Name/Value` envelope —
+// boto3 manda Action=ListSubscriptionsByTopic (não ListSubscriptions).
+// Incluímos explicitamente.
+func isSNSAction(action protocol.Action) bool {
+	switch action {
 	case protocol.ActionCreateTopic, protocol.ActionGetTopicAttributes,
 		protocol.ActionListTopics, protocol.ActionSubscribe,
 		protocol.ActionUnsubscribe, protocol.ActionDeleteTopic,
 		protocol.ActionPublish, protocol.ActionListSubscriptions,
+		protocol.ActionListSubscriptionsByTopic,
 		protocol.ActionConfirmSubscription:
 		return true
 	}
-	// ListSubscriptionsByTopic não tem Action dedicada no protocolo AWS —
-	// usa ListSubscriptions com TopicArn no body. Mas como Action é
-	// "ListSubscriptions", cai em SQS parse → erro. Tratamos explicitamente.
-	return action == "ListSubscriptionsByTopic"
+	return false
 }
 
 // handleAWSQuery trata requests SQS no protocolo Query (form-encoded + XML).

@@ -41,7 +41,7 @@ func ParseSNSJSONRequest(r *http.Request) (Action, map[string]any, error) {
 		return "", nil, fmt.Errorf("Action SNS inválido em X-Amz-Target: %q", action)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxWireBodyBytes))
 	if err != nil {
 		return "", nil, fmt.Errorf("ler body: %w", err)
 	}

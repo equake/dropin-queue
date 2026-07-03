@@ -116,7 +116,7 @@ func run() error {
 		Storage: storage,
 		SQS:     sqsService,
 		SNS:     snsService,
-	})
+	}, cfg.MaxRequestBodyBytes)
 
 	// 8. Lifecycle: rodando em goroutine, escuta sinais de shutdown.
 	serverErr := make(chan error, 1)
