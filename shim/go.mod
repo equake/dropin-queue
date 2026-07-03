@@ -3,6 +3,7 @@ module github.com/anomalyco/generic_queue/shim
 go 1.25.0
 
 require (
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/prometheus/client_golang v1.23.2
 	go.opentelemetry.io/otel v1.44.0
