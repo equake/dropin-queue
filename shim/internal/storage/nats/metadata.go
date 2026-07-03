@@ -221,6 +221,17 @@ func (c *Client) SetQueueAttributes(ctx context.Context, name string, attrs type
 	}
 	c.invalidateStream(streamName)
 
+	// VisibilityTimeout novo → AckWait do consumer durável precisa refletir.
+	// Invalida o cache e recria com o novo valor; réplicas remotas pegam a
+	// config nova no próximo mismatch de AckWait (ensureQueueConsumer).
+	if attrs.VisibilityTimeout > 0 {
+		c.invalidateConsumer(queueConsumerName(name))
+		if _, err := c.ensureQueueConsumer(ctx, s, name, attrs.VisibilityTimeout); err != nil {
+			observability.L().Warn("falha ao atualizar AckWait do consumer",
+				"queue", name, "err", err.Error())
+		}
+	}
+
 	// Atualiza metadata KV com todos os atributos (não só o que mudou).
 	q, err := c.GetQueue(ctx, name)
 	if err != nil {

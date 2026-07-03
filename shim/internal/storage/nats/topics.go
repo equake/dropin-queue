@@ -130,16 +130,22 @@ func (c *Client) loadTopicMetadata(ctx context.Context, name string) (*topicMeta
 }
 
 // topicStreamCfg retorna a configuração JetStream para um tópico SNS.
+//
+// O stream do tópico é apenas um REGISTRO do que foi publicado — o fan-out
+// para subscribers acontece de forma síncrona no Publish, ninguém consome
+// deste stream hoje. Por isso a retenção default é curta (1h, configurável
+// via GQ_TOPIC_MAX_AGE): reter dias de publicações × réplicas seria custo
+// de disco puro sem benefício.
 func (c *Client) topicStreamCfg(t types.Topic) jetstream.StreamConfig {
 	return jetstream.StreamConfig{
 		Name:      "topic-" + sanitizeStreamName(t.Name),
 		Subjects:  []string{c.topicSubject(t.Name)},
 		Storage:   jetstream.FileStorage,
-		Discard:   jetstream.DiscardOld,
+		Discard:   jetstream.DiscardOld, // registro: descartar antigas é OK aqui
 		Retention: jetstream.LimitsPolicy,
-		MaxMsgs:   10_000_000,
-		MaxAge:    4 * 24 * time.Hour, // SNS não tem retention próprio; 4 dias para evitar OOM
-		Replicas:  1,                  // dev mode; prod usa 3
+		MaxMsgs:   defaultMaxMsgsPerQueue,
+		MaxAge:    c.topicMaxAge,
+		Replicas:  c.replicas,
 	}
 }
 
@@ -496,9 +502,14 @@ func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Messa
 		return msg, nil // msg publicada, fan-out falhou
 	}
 
-	// 3. Fan-out: cada subscription é entregue em paralelo (goroutines).
-	// Aguarda todas terminarem antes de retornar.
+	// 3. Fan-out: subscriptions entregues em paralelo, com bound de
+	// concorrência. Sem o bound, um tópico com milhares de subscriptions
+	// dispararia milhares de goroutines por Publish — e todas competindo
+	// pela mesma conexão NATS. O semáforo limita o paralelismo; o ctx do
+	// request limita o tempo total (delivery lento não trava o Publish
+	// para sempre).
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxFanoutConcurrency)
 	for _, sub := range subs {
 		if sub.Pending {
 			// HTTP/HTTPS não confirmados: AWS skip delivery
@@ -509,10 +520,18 @@ func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Messa
 			observability.L().Debug("skip non-matching filter policy", "arn", sub.ARN)
 			continue
 		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			observability.L().Warn("fan-out interrompido por ctx", "topic", topicName)
+			wg.Wait()
+			return msg, nil
+		}
 		wg.Add(1)
 		subCopy := sub
 		go func() {
 			defer wg.Done()
+			defer func() { <-sem }()
 			c.deliverToSubscription(ctx, topic, &subCopy, msg)
 		}()
 	}
@@ -520,6 +539,11 @@ func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Messa
 
 	return msg, nil
 }
+
+// maxFanoutConcurrency limita quantas deliveries de fan-out rodam em
+// paralelo por Publish. Valor conservador: deliveries SQS são publishes
+// no mesmo broker (rápidos); o gargalo é a conexão compartilhada.
+const maxFanoutConcurrency = 16
 
 // deliverToSubscription delivers uma mensagem a uma inscrição específica.
 //

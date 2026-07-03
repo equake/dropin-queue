@@ -46,12 +46,12 @@ func TestSanitizeStreamName_Length(t *testing.T) {
 }
 
 func TestStreamCfg_Defaults(t *testing.T) {
-	c := &Client{prefix: ""}
+	c := &Client{replicas: 1}
 	q := types.Queue{
 		Name:       "test-queue",
 		Attributes: types.DefaultQueueAttributes(),
 	}
-	cfg := c.streamCfg(q, true)
+	cfg := c.streamCfg(q)
 
 	if cfg.Name != "queue-test-queue" {
 		t.Errorf("Name: got %s", cfg.Name)
@@ -60,62 +60,63 @@ func TestStreamCfg_Defaults(t *testing.T) {
 		t.Errorf("Subjects: got %v", cfg.Subjects)
 	}
 	if cfg.Replicas != 1 {
-		t.Errorf("dev mode deve ter 1 réplica, got %d", cfg.Replicas)
+		t.Errorf("replicas deve vir da config, got %d", cfg.Replicas)
 	}
 	if cfg.Storage != jetstream.FileStorage {
 		t.Errorf("Storage deve ser File, got %v", cfg.Storage)
 	}
-	if cfg.Retention != jetstream.LimitsPolicy {
-		t.Errorf("Retention deve ser Limits, got %v", cfg.Retention)
+	// WorkQueuePolicy: mensagem consumida (acked) é apagada na hora —
+	// sem isso, todo o tráfego já processado fica em disco até MaxAge.
+	if cfg.Retention != jetstream.WorkQueuePolicy {
+		t.Errorf("Retention deve ser WorkQueue, got %v", cfg.Retention)
 	}
-	if cfg.MaxMsgs != 10_000_000 {
+	// DiscardNew: fila cheia rejeita publish com erro; DiscardOld
+	// perderia mensagens antigas não-consumidas silenciosamente.
+	if cfg.Discard != jetstream.DiscardNew {
+		t.Errorf("Discard deve ser New, got %v", cfg.Discard)
+	}
+	if cfg.MaxMsgs != defaultMaxMsgsPerQueue {
 		t.Errorf("MaxMsgs default: got %d", cfg.MaxMsgs)
 	}
 }
 
 func TestStreamCfg_CustomRetention(t *testing.T) {
-	c := &Client{prefix: ""}
+	c := &Client{replicas: 1}
 	q := types.Queue{
 		Name: "x",
 		Attributes: types.QueueAttributes{
 			MessageRetentionPeriod: 86400, // 1 dia
 		},
 	}
-	cfg := c.streamCfg(q, true)
+	cfg := c.streamCfg(q)
 	want := 86400 * time.Second
 	if cfg.MaxAge != want {
 		t.Errorf("MaxAge: got %v, want %v", cfg.MaxAge, want)
 	}
 }
 
-func TestStreamCfg_ProductionReplicas(t *testing.T) {
-	c := &Client{prefix: "tenant1"} // prefix != "" indica prod
+func TestStreamCfg_ReplicasFromConfig(t *testing.T) {
+	// Réplicas vêm SEMPRE da config explícita — nunca inferidas de
+	// prefix/ambiente. Um deploy de produção sem GQ_STREAM_REPLICAS=3
+	// falha na validação de config, não roda silenciosamente sem HA.
+	c := &Client{replicas: 3, prefix: "tenant1"}
 	q := types.Queue{Name: "x"}
-	cfg := c.streamCfg(q, c.isDevMode())
+	cfg := c.streamCfg(q)
 	if cfg.Replicas != 3 {
-		t.Errorf("prod mode deve ter 3 réplicas, got %d", cfg.Replicas)
+		t.Errorf("replicas deve vir da config, got %d", cfg.Replicas)
 	}
 }
 
 func TestStreamCfg_FIFO(t *testing.T) {
-	c := &Client{prefix: ""}
+	c := &Client{replicas: 1}
 	q := types.Queue{Name: "my-queue.fifo", FIFO: true}
-	cfg := c.streamCfg(q, true)
+	cfg := c.streamCfg(q)
 	if !q.FIFO {
 		t.Error("FIFO flag deve estar setada")
 	}
 	// Sanity: subjects seguem mesmo padrão (FIFO é tratado por camada superior)
 	if cfg.Subjects[0] != "q.my-queue.fifo.>" {
 		t.Errorf("Subjects: got %v", cfg.Subjects)
-	}
-}
-
-func TestIsDevMode(t *testing.T) {
-	if !(&Client{prefix: ""}).isDevMode() {
-		t.Error("prefix vazio deve ser dev mode")
-	}
-	if (&Client{prefix: "tenant1"}).isDevMode() {
-		t.Error("prefix != '' deve ser prod mode")
 	}
 }
 

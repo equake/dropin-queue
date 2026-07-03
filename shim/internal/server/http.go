@@ -1115,10 +1115,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"no_storage"}`))
 		return
 	}
-	// Tenta uma operação leve no storage como health check.
+	// Ping é O(1) (status da conexão + AccountInfo). NÃO usar ListQueues
+	// aqui: listagem é O(n) filas e o probe roda a cada poucos segundos
+	// em cada réplica — com milhares de filas viraria carga real no broker.
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if _, err := s.handlers.Storage.Queues().ListQueues(ctx, ""); err != nil {
+	if err := s.handlers.Storage.Ping(ctx); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = fmt.Fprintf(w, `{"status":"broker_unavailable","error":%q}`, err.Error())
 		return

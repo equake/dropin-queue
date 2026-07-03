@@ -186,6 +186,12 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 			msg.Attributes["Duplicate"] = "true"
 		}
 	case e := <-ackFuture.Err():
+		// DiscardNew: fila cheia rejeita o publish. Erro tipado para a
+		// camada service mapear para OverLimit (cliente faz backoff).
+		if strings.Contains(strings.ToLower(e.Error()), "maximum messages exceeded") {
+			observability.ObserveStorage("send_message", e, time.Since(start))
+			return nil, storage.ErrQueueFull
+		}
 		// FIFO dedup: mensagem duplicada, retornamos sucesso com ID derivado.
 		if strings.Contains(strings.ToLower(e.Error()), "duplicate") {
 			msg.ID = "dedup-" + msg.MessageDeduplicationId
@@ -219,21 +225,18 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 //	MaxNumberOfMessages    → batch size
 //
 // **Implementação**: usa um único consumer DURÁVEL por fila
-// (nome "shim-consumer-<queueName>"). Esse consumer tem o mesmo comportamento
-// de uma subscription persistente: ele acompanha sua posição no stream e
-// só entrega mensagens não-entregues. Quando você deleta uma mensagem
-// (ack), o consumer avança — a próxima ReceiveMessage NÃO vê essa mensagem.
+// (nome "shim-consumer-<queueName>"), criado no CreateQueue e cacheado
+// localmente — o caminho quente NÃO faz CreateOrUpdateConsumer (que custa
+// 1 RTT ao broker por chamada). O consumer só é atualizado quando o
+// request pede um VisibilityTimeout diferente do atual (caminho raro).
 //
-// Trade-off vs SQS:
+// Múltiplas réplicas do shim podem fazer Fetch no MESMO consumer durável
+// concorrentemente — JetStream distribui as mensagens entre elas. Isso é
+// o que permite escalar o shim horizontalmente.
 //
-//   - SQS: cada ReceiveMessage é uma operação independente que retorna
-//     qualquer mensagem disponível na fila (não importa quantas vezes
-//     foi recebida antes, contanto que visibility timeout tenha expirado).
-//   - Aqui: o consumer durável tem uma posição; após ack, a mensagem é
-//     removida permanentemente. Isso é MAIS próximo de uma fila FIFO real
-//     do que SQS Standard (que pode entregar duplicatas).
-//
-// Cada mensagem devolvida tem ReceiptHandle codificando (consumerName, seq).
+// Cada mensagem devolvida tem ReceiptHandle carregando o reply subject
+// do JetStream (ver encodeReceiptHandle) — o ack/nak funciona de qualquer
+// réplica, sem estado local.
 //
 // Se waitSeconds for 0 e não houver mensagens, retorna imediatamente
 // com slice vazio. Se waitSeconds > 0, bloqueia até esse tempo aguardando
@@ -276,117 +279,136 @@ func (c *Client) ReceiveMessage(
 		waitSeconds = 20
 	}
 
-	streamName := "queue-" + sanitizeStreamName(queueName)
-	stream, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
-			return nil, storage.ErrQueueNotFound
-		}
-		observability.ObserveStorage("receive_message", err, time.Since(start))
-		return nil, fmt.Errorf("get stream: %w", err)
-	}
-
 	observability.IncLongPoll(queueName)
 	defer observability.DecLongPoll(queueName)
 
-	// Consumer DURÁVEL nomeado por fila. Persiste entre chamadas
-	// ReceiveMessage. Sem isso, cada chamada cria novo consumer que
-	// vê TODAS as mensagens do stream.
-	consumerName := "shim-consumer-" + sanitizeStreamName(queueName)
-	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Name:           consumerName,
-		Durable:        consumerName,
-		Description:    "dropin-queue shim receive consumer",
-		AckPolicy:      jetstream.AckExplicitPolicy,
-		MaxAckPending:  1000,
-		AckWait:        time.Duration(visibilityTimeout) * time.Second,
-		FilterSubjects: []string{c.queueSubject(queueName) + ".>"},
-		// InactiveThreshold NÃO é setado — consumer é persistente.
-	})
+	consumer, err := c.ensureQueueConsumer(ctx, nil, queueName, visibilityTimeout)
 	if err != nil {
 		observability.ObserveStorage("receive_message", err, time.Since(start))
-		return nil, fmt.Errorf("create consumer: %w", err)
+		return nil, err
 	}
 
-	fetchOpts := []jetstream.FetchOpt{}
+	// FetchMaxWait é SEMPRE setado — inclusive no short-poll. Sem ele, o
+	// pull request usa o default do servidor (30s) e fica pendente depois
+	// que retornamos: a próxima mensagem da fila seria entregue a um fetch
+	// que ninguém está lendo (invisível até AckWait expirar). O bug ficava
+	// mascarado quando CreateOrUpdateConsumer rodava a cada receive
+	// (cancelava os pulls antigos); com consumer cacheado ele aparecia.
+	maxWait := shortPollMaxWait
 	if waitSeconds > 0 {
-		fetchOpts = append(fetchOpts, jetstream.FetchMaxWait(time.Duration(waitSeconds)*time.Second))
+		maxWait = time.Duration(waitSeconds) * time.Second
 	}
+	fetchOpts := []jetstream.FetchOpt{jetstream.FetchMaxWait(maxWait)}
 	mset, err := consumer.Fetch(int(maxMessages), fetchOpts...)
 	if err != nil {
-		observability.ObserveStorage("receive_message", err, time.Since(start))
-		return nil, fmt.Errorf("fetch: %w", err)
+		// Handle cacheado pode estar stale (fila deletada/recriada por
+		// outra réplica). Invalida e tenta uma vez com consumer fresco.
+		c.invalidateConsumer(queueConsumerName(queueName))
+		consumer, err = c.ensureQueueConsumer(ctx, nil, queueName, visibilityTimeout)
+		if err != nil {
+			observability.ObserveStorage("receive_message", err, time.Since(start))
+			return nil, err
+		}
+		mset, err = consumer.Fetch(int(maxMessages), fetchOpts...)
+		if err != nil {
+			observability.ObserveStorage("receive_message", err, time.Since(start))
+			return nil, fmt.Errorf("fetch: %w", err)
+		}
 	}
 
 	out := make([]types.Message, 0, maxMessages)
-	msgRefs := make([]jetstream.Msg, 0, maxMessages)
 
-	shortPoll := waitSeconds == 0
-	shortPollTimeout := 100 * time.Millisecond
-
+	// O canal fecha quando o fetch completa (batch cheio) ou MaxWait
+	// expira NO SERVIDOR — não abandonamos o fetch com pull pendente.
 	for {
-		var deadline <-chan time.Time
-		if shortPoll {
-			deadline = time.After(shortPollTimeout)
-		}
 		select {
 		case <-ctx.Done():
-			c.storePending(consumerName, msgRefs)
 			return out, nil
 		case msg, ok := <-mset.Messages():
 			if !ok {
-				c.storePending(consumerName, msgRefs)
-				if err := mset.Error(); err != nil && len(out) == 0 {
+				if err := mset.Error(); err != nil && len(out) == 0 &&
+					!errors.Is(err, nats.ErrTimeout) {
 					return nil, fmt.Errorf("fetch error: %w", err)
 				}
 				return out, nil
 			}
-			parsed := parseJetStreamMsg(msg, consumerName)
-			out = append(out, parsed)
-			msgRefs = append(msgRefs, msg)
+			out = append(out, parseJetStreamMsg(msg))
 			if int32(len(out)) >= maxMessages {
-				c.storePending(consumerName, msgRefs)
 				return out, nil
 			}
-			if shortPoll {
-				continue
-			}
-		case <-deadline:
-			if shortPoll {
-				c.storePending(consumerName, msgRefs)
-				return out, nil
-			}
-			c.storePending(consumerName, msgRefs)
-			return out, nil
 		}
 	}
 }
 
-// storePending guarda as jetstream.Msg em cache indexado por
-// (consumerName, sequence) para uso posterior em DeleteMessage /
-// ChangeMessageVisibility.
-func (c *Client) storePending(consumerName string, msgs []jetstream.Msg) {
-	if len(msgs) == 0 {
-		return
+// shortPollMaxWait é o MaxWait do Fetch quando WaitTimeSeconds=0
+// (short-poll SQS): tempo suficiente para o broker responder com as
+// mensagens já disponíveis, curto o bastante para "retorna imediatamente".
+const shortPollMaxWait = 100 * time.Millisecond
+
+// queueConsumerName retorna o nome do consumer durável de uma fila.
+//
+// ATENÇÃO: mudar este formato invalida receipt handles em voo (eles
+// carregam o reply subject, que embute o nome do consumer).
+func queueConsumerName(queueName string) string {
+	return "shim-consumer-" + sanitizeStreamName(queueName)
+}
+
+// ensureQueueConsumer devolve o consumer durável da fila.
+//
+// Caminho quente: cache local (zero RTTs). Caminho frio (primeira chamada
+// nesta réplica, ou VisibilityTimeout diferente do atual): busca o stream
+// e faz CreateOrUpdateConsumer.
+//
+// stream pode ser nil — será buscado se necessário (só no caminho frio).
+//
+// InactiveThreshold NÃO é setado — o consumer é persistente e acompanha
+// a posição da fila; removê-lo perderia o estado de entrega.
+func (c *Client) ensureQueueConsumer(
+	ctx context.Context,
+	stream jetstream.Stream,
+	queueName string,
+	visibilityTimeout int32,
+) (jetstream.Consumer, error) {
+	name := queueConsumerName(queueName)
+	ackWait := time.Duration(visibilityTimeout) * time.Second
+
+	if consumer, ok := c.cachedQueueConsumer(name, ackWait); ok {
+		return consumer, nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.pendingMsgs[consumerName]; !ok {
-		c.pendingMsgs[consumerName] = make(map[uint64]jetstream.Msg)
-	}
-	for _, m := range msgs {
-		meta, _ := m.Metadata()
-		if meta != nil {
-			c.pendingMsgs[consumerName][meta.Sequence.Stream] = m
+
+	if stream == nil {
+		streamName := "queue-" + sanitizeStreamName(queueName)
+		s, err := c.js.Stream(ctx, streamName)
+		if err != nil {
+			if errors.Is(err, jetstream.ErrStreamNotFound) {
+				return nil, storage.ErrQueueNotFound
+			}
+			return nil, fmt.Errorf("get stream: %w", err)
 		}
+		stream = s
 	}
+
+	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Name:           name,
+		Durable:        name,
+		Description:    "dropin-queue shim receive consumer",
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		MaxAckPending:  c.maxAckPending,
+		AckWait:        ackWait,
+		FilterSubjects: []string{c.queueSubject(queueName) + ".>"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create consumer: %w", err)
+	}
+	c.cacheQueueConsumer(name, consumer, ackWait)
+	return consumer, nil
 }
 
 // parseJetStreamMsg converte jetstream.Msg em types.Message.
 //
 // Extrai body, headers (X-Sqs-Atr-* → MessageAttributes), metadata.
-// ReceiptHandle é setado externamente (precisa do consumer name).
-func parseJetStreamMsg(msg jetstream.Msg, consumerName string) types.Message {
+// ReceiptHandle carrega o reply subject do JetStream (stateless).
+func parseJetStreamMsg(msg jetstream.Msg) types.Message {
 	out := types.Message{
 		Body:       string(msg.Data()),
 		EnqueuedAt: time.Now().UTC(),
@@ -403,6 +425,11 @@ func parseJetStreamMsg(msg jetstream.Msg, consumerName string) types.Message {
 			out.EnqueuedAt = meta.Timestamp
 		}
 		out.Attributes["SentTimestamp"] = fmt.Sprintf("%d", out.EnqueuedAt.UnixMilli())
+		// NumDelivered do JetStream conta entregas reais (1 na primeira,
+		// incrementa a cada redelivery) — igual ao ApproximateReceiveCount.
+		if meta.NumDelivered > 0 {
+			out.Attributes["ApproximateReceiveCount"] = strconv.FormatUint(meta.NumDelivered, 10)
+		}
 	}
 
 	sum := md5.Sum(msg.Data())
@@ -448,83 +475,88 @@ func parseJetStreamMsg(msg jetstream.Msg, consumerName string) types.Message {
 		}
 	}
 
-	out.ReceiptHandle = encodeReceiptHandle(consumerName, meta.Sequence.Stream)
+	out.ReceiptHandle = encodeReceiptHandle(msg.Reply())
 	return out
 }
 
 // encodeReceiptHandle codifica um receipt handle opaco para o cliente.
 //
-// Formato: "rh1:<consumerName>:<streamSeq>" — versionado para permitir
+// Formato: "rh2:<base64url(replySubject)>" — versionado para permitir
 // evolução futura.
 //
-// O consumerName identifica o consumer que detém a mensagem (necessário
-// para ack/nak). O streamSeq é a sequence dentro do stream (única na fila).
-func encodeReceiptHandle(consumerName string, streamSeq uint64) string {
-	return fmt.Sprintf("rh1:%s:%d", consumerName, streamSeq)
+// O reply subject ($JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.
+// <ts>.<pending>) é tudo que o JetStream precisa para ack/nak — publicar
+// "+ACK"/"-NAK" nele confirma/devolve a mensagem. Como não depende de
+// NENHUM estado local do shim, qualquer réplica processa o DeleteMessage,
+// não importa qual recebeu a mensagem. É isso que torna o shim stateless.
+func encodeReceiptHandle(replySubject string) string {
+	return "rh2:" + base64.RawURLEncoding.EncodeToString([]byte(replySubject))
 }
 
-// decodeReceiptHandle extrai consumerName e streamSeq do receipt handle.
+// decodeReceiptHandle extrai o reply subject do receipt handle.
 //
-// Devolve erro se formato inválido (receipt handle expirado ou corrompido).
-func decodeReceiptHandle(rh string) (consumerName string, streamSeq uint64, err error) {
-	parts := strings.Split(rh, ":")
-	if len(parts) != 3 || parts[0] != "rh1" {
-		return "", 0, fmt.Errorf("receipt handle inválido: %q", rh)
+// Devolve erro se formato inválido (receipt handle corrompido ou de
+// versão antiga do shim).
+func decodeReceiptHandle(rh string) (replySubject string, err error) {
+	raw, ok := strings.CutPrefix(rh, "rh2:")
+	if !ok {
+		return "", fmt.Errorf("receipt handle inválido: %q", rh)
 	}
-	seq, perr := strconv.ParseUint(parts[2], 10, 64)
-	if perr != nil {
-		return "", 0, fmt.Errorf("receipt handle com sequence inválida: %q", parts[2])
+	decoded, derr := base64.RawURLEncoding.DecodeString(raw)
+	if derr != nil {
+		return "", fmt.Errorf("receipt handle corrompido: %q", rh)
 	}
-	return parts[1], seq, nil
+	reply := string(decoded)
+	if !strings.HasPrefix(reply, "$JS.ACK.") {
+		return "", fmt.Errorf("receipt handle com reply subject inválido")
+	}
+	return reply, nil
 }
 
-// fetchAndAck busca uma mensagem específica por streamSeq em um consumer
-// e aplica uma ação (ack/nak). Usado por DeleteMessage e ChangeMessageVisibility.
+// validateReceiptQueue confere que o receipt handle pertence à fila.
 //
-// **Implementação alternativa baseada em cache local** — em vez de confiar
-// em NATS para retornar pending messages em um segundo Fetch (comportamento
-// que observamos ser flaky), mantemos um cache em memória de mensagens
-// recebidas indexado por (consumerName, sequence). Isso simplifica
-// enormemente a lógica e elimina a dependência de comportamento interno
-// do JetStream que pode mudar entre versões.
+// O reply subject tem o stream no 3º token (formato v1, 9 tokens) ou no
+// 5º (formato v2 com domain+account hash, 12 tokens). Rejeitar receipts
+// de outra fila evita deletar mensagem errada por engano do cliente.
+func validateReceiptQueue(replySubject, queueName string) error {
+	tokens := strings.Split(replySubject, ".")
+	var stream string
+	switch {
+	case len(tokens) == 9:
+		stream = tokens[2]
+	case len(tokens) >= 12:
+		stream = tokens[4]
+	default:
+		return storage.ErrInvalidReceiptHandle("reply subject com formato desconhecido")
+	}
+	expected := "queue-" + sanitizeStreamName(queueName)
+	if stream != expected {
+		return storage.ErrInvalidReceiptHandle(
+			fmt.Sprintf("receipt handle pertence a outra fila (%s)", stream))
+	}
+	return nil
+}
+
+// publishAck publica um payload de ack ("+ACK"/"-NAK ...") no reply
+// subject e faz flush para garantir que o broker recebeu.
 //
-// Trade-off: cache cresce até InactiveThreshold=60s limpar o consumer;
-// cleanup passivo via TTL no map evita leak.
-//
-// Retorna erros tipados (storage.ErrInvalidReceiptHandleT) diretamente
-// sem wrapping para que errors.As funcione na camada service.
-func (c *Client) fetchAndAck(
-	ctx context.Context,
-	queueName, consumerName string,
-	targetSeq uint64,
-	ackFunc func(jetstream.Msg) error,
-) error {
-	c.mu.Lock()
-	cache, ok := c.pendingMsgs[consumerName]
-	c.mu.Unlock()
-	if !ok {
-		// Consumer efêmero expirou ou nunca existiu — receipt expirado.
-		return storage.ErrInvalidReceiptHandle("consumer não existe (receipt expirado)")
+// Mesmo mecanismo que jetstream.Msg.Ack() usa por baixo — mas sem
+// precisar da jetstream.Msg original, então funciona de qualquer réplica.
+// Ack repetido é ignorado pelo servidor (idempotente, igual SQS).
+func (c *Client) publishAck(ctx context.Context, replySubject string, payload []byte) error {
+	if err := c.nc.Publish(replySubject, payload); err != nil {
+		return fmt.Errorf("publish ack: %w", err)
 	}
-
-	c.mu.Lock()
-	msgRef, ok := cache[targetSeq]
-	c.mu.Unlock()
-	if !ok {
-		return storage.ErrInvalidReceiptHandle(fmt.Sprintf("sequence %d não encontrada", targetSeq))
+	// FlushWithContext exige ctx com deadline; garante uma se não houver.
+	flushCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		flushCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
 	}
-
-	if err := ackFunc(msgRef); err != nil {
-		if !errors.Is(err, jetstream.ErrMsgAlreadyAckd) {
-			return fmt.Errorf("ack action: %w", err)
-		}
+	if err := c.nc.FlushWithContext(flushCtx); err != nil {
+		return fmt.Errorf("flush ack: %w", err)
 	}
-
-	// Remove do cache após sucesso.
-	c.mu.Lock()
-	delete(c.pendingMsgs[consumerName], targetSeq)
-	c.mu.Unlock()
-
 	return nil
 }
 
@@ -542,15 +574,15 @@ func (c *Client) DeleteMessage(ctx context.Context, queueName string, receiptHan
 	if receiptHandle == "" {
 		return storage.ErrInvalidArgument("receipt handle vazio")
 	}
-	consumerName, streamSeq, err := decodeReceiptHandle(receiptHandle)
+	reply, err := decodeReceiptHandle(receiptHandle)
 	if err != nil {
 		return storage.ErrInvalidReceiptHandle(err.Error())
 	}
+	if err := validateReceiptQueue(reply, queueName); err != nil {
+		return err
+	}
 
-	err = c.fetchAndAck(ctx, queueName, consumerName, streamSeq, func(m jetstream.Msg) error {
-		return m.Ack()
-	})
-	if err != nil {
+	if err := c.publishAck(ctx, reply, []byte("+ACK")); err != nil {
 		observability.ObserveStorage("delete_message", err, time.Since(start))
 		return err
 	}
@@ -580,15 +612,23 @@ func (c *Client) ChangeMessageVisibility(
 	if visibilityTimeout < 0 || visibilityTimeout > 43200 {
 		return storage.ErrInvalidArgument("visibilityTimeout fora do range [0, 43200]")
 	}
-	consumerName, streamSeq, err := decodeReceiptHandle(receiptHandle)
+	reply, err := decodeReceiptHandle(receiptHandle)
 	if err != nil {
 		return storage.ErrInvalidReceiptHandle(err.Error())
 	}
+	if err := validateReceiptQueue(reply, queueName); err != nil {
+		return err
+	}
 
-	err = c.fetchAndAck(ctx, queueName, consumerName, streamSeq, func(m jetstream.Msg) error {
-		return m.NakWithDelay(time.Duration(visibilityTimeout) * time.Second)
-	})
-	if err != nil {
+	// "-NAK {\"delay\": ns}" é o payload wire que NakWithDelay usa —
+	// devolve a mensagem para redelivery após o delay (= novo visibility
+	// timeout). VisibilityTimeout=0 usa "-NAK" puro: redelivery imediato.
+	payload := []byte("-NAK")
+	if visibilityTimeout > 0 {
+		payload = []byte(fmt.Sprintf(`-NAK {"delay": %d}`,
+			(time.Duration(visibilityTimeout) * time.Second).Nanoseconds()))
+	}
+	if err := c.publishAck(ctx, reply, payload); err != nil {
 		observability.ObserveStorage("change_visibility", err, time.Since(start))
 		return err
 	}
@@ -598,7 +638,9 @@ func (c *Client) ChangeMessageVisibility(
 
 // QueueDepth devolve o número aproximado de mensagens disponíveis.
 //
-// Lê StreamInfo.State.Msgs — aproximado, igual ao SQS.
+// Lê StreamInfo.State.Msgs. Com WorkQueuePolicy, mensagens acked são
+// removidas do stream — State.Msgs conta apenas não-consumidas (visíveis
+// + in-flight), próximo do ApproximateNumberOfMessages do SQS.
 func (c *Client) QueueDepth(ctx context.Context, queueName string) (int64, error) {
 	start := time.Now()
 	defer func() { observability.ObserveStorage("queue_depth", nil, time.Since(start)) }()

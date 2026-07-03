@@ -90,7 +90,7 @@ func TestLoad_Flags(t *testing.T) {
 	t.Setenv("GQ_AUTH_MODE", "")
 	t.Setenv("GQ_ACCOUNT_ID", "")
 
-	c, err := Load([]string{"dropin-queue", "--addr=:5000", "--auth-mode=strict", "--account-id=111122223333"})
+	c, err := Load([]string{"dropin-queue", "--addr=:5000", "--auth-mode=strict", "--account-id=111122223333", "--stream-replicas=3"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -109,6 +109,7 @@ func TestLoad_Env(t *testing.T) {
 	t.Setenv("GQ_ADDR", ":7000")
 	t.Setenv("GQ_AUTH_MODE", "verify")
 	t.Setenv("GQ_SHUTDOWN_TIMEOUT", "5s")
+	t.Setenv("GQ_STREAM_REPLICAS", "3")
 
 	c, err := Load([]string{"dropin-queue"})
 	if err != nil {
@@ -134,5 +135,38 @@ func TestLoad_EnvOverridesDefaults(t *testing.T) {
 	}
 	if c.NATSURL != "tls://nats.example.com:4222" {
 		t.Errorf("NATSURL: got %s", c.NATSURL)
+	}
+}
+
+func TestValidate_ProductionRequiresReplicas(t *testing.T) {
+	// Fail-loud: auth-mode de produção (verify/strict) com 1 réplica de
+	// stream = perda de dados na queda de 1 nó. A config DEVE ser rejeitada
+	// para que o deploy quebre visivelmente em vez de rodar sem HA.
+	c := Default()
+	c.AuthMode = AuthModeStrict
+	c.StreamReplicas = 1
+	if err := c.Validate(); err == nil {
+		t.Error("auth-mode strict com stream-replicas=1 deve ser rejeitado")
+	}
+
+	c.StreamReplicas = 3
+	if err := c.Validate(); err != nil {
+		t.Errorf("strict + 3 réplicas deve ser válido: %v", err)
+	}
+}
+
+func TestValidate_StreamReplicasOddQuorum(t *testing.T) {
+	c := Default()
+	for _, n := range []int{1, 3, 5} {
+		c.StreamReplicas = n
+		if err := c.Validate(); err != nil {
+			t.Errorf("replicas=%d deve ser válido: %v", n, err)
+		}
+	}
+	for _, n := range []int{0, 2, 4, 7, -1} {
+		c.StreamReplicas = n
+		if err := c.Validate(); err == nil {
+			t.Errorf("replicas=%d deve ser rejeitado (Raft exige 1/3/5)", n)
+		}
 	}
 }

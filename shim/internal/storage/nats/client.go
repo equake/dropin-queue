@@ -22,6 +22,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/storage"
 )
 
 const (
@@ -40,6 +41,11 @@ const (
 // Client encapsula a conexão com NATS JetStream e expõe a interface Storage.
 //
 // Uma instância é segura para uso concorrente — JetStream context é goroutine-safe.
+//
+// O Client NÃO guarda estado por mensagem: receipt handles carregam o reply
+// subject do JetStream (ver messages.go), então qualquer réplica do shim
+// consegue ack/nak qualquer mensagem. Isso permite escalar horizontalmente
+// (N réplicas atrás de um LB) sem sticky sessions.
 type Client struct {
 	nc      *nats.Conn
 	js      jetstream.JetStream
@@ -48,25 +54,34 @@ type Client struct {
 	prefix  string                      // prefixo adicional para multi-tenant (futuro)
 	kvCache jetstream.KeyValue          // cache do bucket de metadados (lazy init)
 
-	// pendingMsgs é um cache de mensagens recebidas mas não confirmadas.
-	// Chave externa: consumerName (efêmero, criado por ReceiveMessage).
-	// Chave interna: stream sequence.
-	// Valor: jetstream.Msg com métodos Ack/Nak.
-	//
-	// Necessário porque Fetch no mesmo consumer após o primeiro não retorna
-	// necessariamente pending messages (depende de estado interno do servidor).
-	// Cache local elimina essa dependência.
-	//
-	// Cleanup: entry é removida após ack/nak. Consumer efêmero é removido
-	// pelo servidor após InactiveThreshold=60s; nesse ponto a entry no map
-	// também deixa de ser referenciada.
-	pendingMsgs map[string]map[uint64]jetstream.Msg
+	// consumers é o cache de consumers duráveis por fila (chave: consumer
+	// name). Evita CreateOrUpdateConsumer (1 RTT ao broker) a cada
+	// ReceiveMessage no caminho quente. ackWait registra o AckWait com que
+	// o consumer foi criado/atualizado — se um ReceiveMessage pedir
+	// VisibilityTimeout diferente, o consumer é atualizado (caminho raro).
+	consumers map[string]cachedConsumer
+
+	// replicas é o número de réplicas Raft por stream (1 dev, 3 prod).
+	// Vem de config — nunca inferido.
+	replicas int
+
+	// maxAckPending limita mensagens in-flight por fila.
+	maxAckPending int
+
+	// topicMaxAge é a retenção do stream de arquivo dos tópicos SNS.
+	topicMaxAge time.Duration
 
 	// topicKVCache é o KV bucket de metadados dos tópicos (lazy init).
 	topicKVCache jetstream.KeyValue
 
 	// subKVCache é o KV bucket de metadados das subscriptions (lazy init).
 	subKVCache jetstream.KeyValue
+}
+
+// cachedConsumer é uma entrada do cache de consumers duráveis.
+type cachedConsumer struct {
+	consumer jetstream.Consumer
+	ackWait  time.Duration
 }
 
 // Options configura a conexão NATS.
@@ -85,6 +100,18 @@ type Options struct {
 
 	// Prefix: prefixo extra para subjects (multi-tenant).
 	Prefix string
+
+	// StreamReplicas: réplicas Raft por stream (1 dev, 3 prod).
+	// Se 0, assume 1.
+	StreamReplicas int
+
+	// MaxAckPending: máximo de mensagens in-flight por fila.
+	// Se 0, assume 1000.
+	MaxAckPending int
+
+	// TopicMaxAge: retenção do stream de arquivo dos tópicos SNS.
+	// Se 0, assume 1 hora.
+	TopicMaxAge time.Duration
 }
 
 // Connect estabelece conexão com NATS JetStream.
@@ -143,12 +170,28 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("jetstream new: %w", err)
 	}
 
+	replicas := opts.StreamReplicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	maxAckPending := opts.MaxAckPending
+	if maxAckPending == 0 {
+		maxAckPending = 1000
+	}
+	topicMaxAge := opts.TopicMaxAge
+	if topicMaxAge == 0 {
+		topicMaxAge = time.Hour
+	}
+
 	c := &Client{
-		nc:          nc,
-		js:          js,
-		streams:     make(map[string]jetstream.Stream),
-		prefix:      opts.Prefix,
-		pendingMsgs: make(map[string]map[uint64]jetstream.Msg),
+		nc:            nc,
+		js:            js,
+		streams:       make(map[string]jetstream.Stream),
+		prefix:        opts.Prefix,
+		consumers:     make(map[string]cachedConsumer),
+		replicas:      replicas,
+		maxAckPending: maxAckPending,
+		topicMaxAge:   topicMaxAge,
 	}
 
 	// Valida que o account tem JetStream habilitado.
@@ -204,4 +247,45 @@ func (c *Client) invalidateStream(name string) {
 	c.mu.Lock()
 	delete(c.streams, name)
 	c.mu.Unlock()
+}
+
+// cachedQueueConsumer devolve o consumer cacheado se o AckWait bater.
+func (c *Client) cachedQueueConsumer(name string, ackWait time.Duration) (jetstream.Consumer, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.consumers[name]
+	if !ok || entry.ackWait != ackWait {
+		return nil, false
+	}
+	return entry.consumer, true
+}
+
+// cacheQueueConsumer registra o consumer no cache.
+func (c *Client) cacheQueueConsumer(name string, consumer jetstream.Consumer, ackWait time.Duration) {
+	c.mu.Lock()
+	c.consumers[name] = cachedConsumer{consumer: consumer, ackWait: ackWait}
+	c.mu.Unlock()
+}
+
+// invalidateConsumer remove o consumer do cache (DeleteQueue,
+// SetQueueAttributes com novo VisibilityTimeout, etc.).
+func (c *Client) invalidateConsumer(name string) {
+	c.mu.Lock()
+	delete(c.consumers, name)
+	c.mu.Unlock()
+}
+
+// Ping verifica que o broker está acessível e com JetStream habilitado.
+//
+// Custo O(1) — usado pelo readiness probe. NÃO usar ListQueues aqui:
+// listagem de streams é O(n) e o probe roda a cada poucos segundos em
+// cada réplica.
+func (c *Client) Ping(ctx context.Context) error {
+	if c.nc == nil || !c.nc.IsConnected() {
+		return storage.ErrBrokerUnavailable
+	}
+	if _, err := c.js.AccountInfo(ctx); err != nil {
+		return fmt.Errorf("jetstream account info: %w", err)
+	}
+	return nil
 }

@@ -40,6 +40,12 @@ var (
 
 	// ErrBrokerUnavailable: broker offline ou ctx cancelado.
 	ErrBrokerUnavailable = errors.New("broker unavailable")
+
+	// ErrQueueFull: a fila atingiu o limite de backlog (MaxMsgs) e o
+	// publish foi rejeitado (DiscardNew). A camada service traduz para
+	// OverLimit — o cliente deve fazer backoff. Perder mensagens antigas
+	// silenciosamente (DiscardOld) nunca é aceitável.
+	ErrQueueFull = errors.New("queue full")
 )
 
 // ErrInvalidArgument é um erro genérico para parâmetros inválidos passados
@@ -163,6 +169,11 @@ type Storage interface {
 	Queues() QueueStorage
 	Messages() MessageStorage
 	Topics() TopicStorage
+
+	// Ping verifica conectividade com o broker em O(1). Usado pelo
+	// readiness probe — NÃO deve listar recursos (custo cresce com o
+	// número de filas).
+	Ping(ctx context.Context) error
 
 	// Close fecha conexões com o broker.
 	Close() error
