@@ -61,6 +61,12 @@ type Client struct {
 	// pelo servidor após InactiveThreshold=60s; nesse ponto a entry no map
 	// também deixa de ser referenciada.
 	pendingMsgs map[string]map[uint64]jetstream.Msg
+
+	// topicKVCache é o KV bucket de metadados dos tópicos (lazy init).
+	topicKVCache jetstream.KeyValue
+
+	// subKVCache é o KV bucket de metadados das subscriptions (lazy init).
+	subKVCache jetstream.KeyValue
 }
 
 // Options configura a conexão NATS.
