@@ -1,0 +1,78 @@
+# Binários Go
+/shim/bin/
+/shim/shimd
+/shim/dist/
+
+# Arquivos de cobertura
+*.out
+coverage.txt
+
+# Dependências (Go modules)
+/vendor/
+
+# IDEs e editores
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Logs e runtime
+*.log
+*.pid
+
+# Ambientes locais
+.env
+.env.local
+.env.*.local
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Outputs do Terraform
+terraform/*/plan.out
+terraform/*/plan.tfplan
+
+# Ansible
+*.retry
+.vault-password
+
+# Dados de teste / cache de testes
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Docker
+/docker-data/
+/docker-volumes/
+
+# Volumes docker-compose locais
+data/
+secrets/
+
+# Certificados e chaves geradas localmente
+*.pem
+*.key
+*.crt
+!test/fixtures/*.crt
+
+# Snapshots NATS
+nats-data/
+jetstream-data/
