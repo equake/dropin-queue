@@ -34,9 +34,25 @@ jobs:
         working-directory: shim
         run: go mod download
 
+      - name: Formatação (gofmt)
+        working-directory: shim
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Arquivos não formatados (rode 'make fmt'):"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Vet
         working-directory: shim
         run: go vet ./...
+
+      - name: Vulnerabilidades (govulncheck)
+        working-directory: shim
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
       - name: Build
         working-directory: shim

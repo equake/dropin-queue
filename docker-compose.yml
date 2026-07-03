@@ -38,7 +38,9 @@ services:
   # Por enquanto apenas provisionado para uso futuro com JetStream
   # File Storage snapshots. O dropin-server não usa ainda.
   minio:
-    image: minio/minio:latest
+    # Tag pinada — "latest" é não-determinístico e pode quebrar CI/dev
+    # silenciosamente em um pull.
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: dq-minio
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -79,6 +81,7 @@ services:
       GQ_AUTH_MODE: "off"           # dev only — produção usa strict
       GQ_LOG_LEVEL: "info"
       GQ_SHUTDOWN_TIMEOUT: "10s"
+      GQ_STREAM_REPLICAS: "1"       # dev single-node; produção usa 3 (HA)
     ports:
       - "4566:4566"
     networks:

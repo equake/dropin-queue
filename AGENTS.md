@@ -72,7 +72,7 @@ Stack:
 
 - [ ] `make test` passa (testes Go com race detector)
 - [ ] Teste E2E adicionado em `shim/test/integration/` para a nova funcionalidade
-- [ ] `make test-int` passa (65/65 mínimo; deve crescer a cada feature)
+- [ ] `make test-int` passa (70/70 mínimo; deve crescer a cada feature)
 - [ ] README atualizado: tabela de compatibilidade + seção "Funcionalidades" + comando quickstart se aplicável
 - [ ] Commit em português, mensagem detalhada descrevendo o **porquê** (não só o quê)
 - [ ] `git push origin main` e atualize descrição do repo se a feature mudar o escopo

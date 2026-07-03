@@ -38,12 +38,29 @@
 8. **Stream não expõe `PublishMsgAsync` — use o client JetStream.**
    `js.PublishMsgAsync(nmsg)` é o caminho. `stream.PublishMsgAsync` não existe.
 
-9. **`FetchMaxWait(0)` é rejeitado.** Skip o opt quando `waitSeconds=0` e use deadline
-   interno curto (100ms é suficiente).
+9. **NUNCA faça `Fetch` sem `FetchMaxWait`.** Sem MaxWait, o pull request usa o
+   default do servidor (30s) e fica pendente DEPOIS que você retorna — a próxima
+   mensagem da fila é entregue a um fetch que ninguém está lendo (invisível até
+   AckWait expirar). Short-poll usa `FetchMaxWait(100ms)`; `FetchMaxWait(0)` é
+   rejeitado pela lib. Esse bug ficou mascarado por meses porque
+   `CreateOrUpdateConsumer` a cada receive cancelava os pulls fantasma.
 
 10. **Consumer EFÊMERO por chamada ReceiveMessage não funciona.**
-    Solução atual: 1 consumer durável por fila + cache em memória de mensagens
-    pendentes indexado por `(consumerName, sequence)`.
+    Solução atual: 1 consumer durável por fila (criado no CreateQueue, cacheado)
+    + receipt handle carregando o reply subject `$JS.ACK` — ack/nak é um publish
+    no reply subject, de qualquer réplica, sem estado local.
+
+10b. **`FlushWithContext` exige ctx COM deadline.** Ctx sem deadline retorna
+    `nats: context requires a deadline` — e o ctx de request HTTP não tem.
+    Embrulhe com `context.WithTimeout` antes.
+
+10c. **`Retention` de stream é IMUTÁVEL.** `UpdateStream` mudando Retention
+    falha. Migração LimitsPolicy → WorkQueuePolicy exige recriar o stream
+    (`make down-v` em dev; em produção, migração de dados).
+
+10d. **`-NAK {"delay": 0}` ≠ `-NAK` puro.** Com o payload JSON de delay 0 a
+    redelivery pode demorar mais que a janela de um short-poll (100ms). Para
+    visibility timeout 0 (redelivery imediato), envie `-NAK` sem payload.
 
 ## AWS SDK / boto3 specifics
 
@@ -61,13 +78,15 @@
 
 ## Storage / Sharding
 
-15. **ApproximateNumberOfMessages usa `Stream.State.Msgs`** que inclui mensagens já
-    acked (lag de update do JetStream). Para count preciso, mantenha counter atômico
-    em memória ou use Consumer `num_ack_pending`.
+15. **ApproximateNumberOfMessages usa `Stream.State.Msgs`.** Com WorkQueuePolicy
+    (retention atual), mensagens acked são apagadas — o número reflete só
+    não-consumidas (visíveis + in-flight), próximo do SQS. Pode haver pequeno
+    lag de update do JetStream.
 
-16. **Consumer único por fila (atual).**
-    Não suporta múltiplos clients paralelos consumindo da mesma fila. SQS Standard
-    permite. Roadmap: sharding por partition key.
+16. **Múltiplos clients na mesma fila funcionam via pull consumer compartilhado.**
+    N réplicas do shim (e N clients) fazem `Fetch` no MESMO consumer durável;
+    JetStream distribui as mensagens. Receipt handles são stateless (reply
+    subject), então o delete pode chegar em qualquer réplica.
 
 ## Convenções de código
 
