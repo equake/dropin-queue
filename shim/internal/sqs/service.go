@@ -62,6 +62,17 @@ const (
 	// ErrCodePurgeQueueInProgress: PurgeQueue já está rodando para essa fila
 	// (SQS devolve isso se PurgeQueue for chamado em <60s após o anterior).
 	ErrCodePurgeQueueInProgress = "PurgeQueueInProgress"
+
+	// ErrCodeBatchEntryIdsNotDistinct: SendMessageBatch/DeleteMessageBatch com
+	// Ids duplicados dentro do mesmo batch.
+	ErrCodeBatchEntryIdsNotDistinct = "BatchEntryIdsNotDistinct"
+
+	// ErrCodeTooManyEntriesInBatch: SendMessageBatch/DeleteMessageBatch com
+	// mais de 10 entries.
+	ErrCodeTooManyEntriesInBatch = "TooManyEntriesInBatch"
+
+	// ErrCodeEmptyBatchRequest: SendMessageBatch/DeleteMessageBatch sem entries.
+	ErrCodeEmptyBatchRequest = "EmptyBatchRequest"
 )
 
 // Service implementa as operações SQS.
@@ -481,6 +492,409 @@ func queueNameFromURL(queueURL string) string {
 		return queueURL
 	}
 	return queueURL[idx+1:]
+}
+
+// --- SendMessageBatch ---
+
+// Limites AWS para SendMessageBatch / DeleteMessageBatch.
+const (
+	// MaxBatchEntries é o máximo de entries por batch (AWS limit).
+	MaxBatchEntries = 10
+
+	// MaxBatchTotalBytes é o tamanho máximo total dos bodies em um batch.
+	// 256 KiB conforme AWS docs.
+	MaxBatchTotalBytes = 256 * 1024
+)
+
+// BatchSendEntry é uma entry do SendMessageBatch.
+//
+// Formato unificado (não depende do protocolo wire).
+type BatchSendEntry struct {
+	Id                     string
+	MessageBody            string
+	DelaySeconds           int32
+	MessageGroupId         string
+	MessageDeduplicationId string
+	MessageAttributes      map[string]protocol.MessageAttributeValue
+}
+
+// BatchDeleteEntry é uma entry do DeleteMessageBatch.
+type BatchDeleteEntry struct {
+	Id                string
+	ReceiptHandle     string
+	VisibilityTimeout int32 // 0 → delete direto; >0 → change visibility + delete (não é delete "real", use ChangeMessageVisibilityBatch — não implementado)
+}
+
+// BatchResultEntry representa uma entry que teve sucesso.
+type BatchResultEntry struct {
+	Id            string
+	MessageID     string // SendMessageBatch: id da mensagem publicada
+	MD5OfBody     string // SendMessageBatch: MD5 do body
+	SequenceNo    string // FIFO only (SendMessageBatch)
+}
+
+// BatchFailureEntry representa uma entry que falhou.
+type BatchFailureEntry struct {
+	Id         string
+	Code       string // AWS error code (e.g. "MessageTooLarge", "ReceiptHandleIsInvalid")
+	Message    string
+	SenderFault bool
+}
+
+// SendMessageBatchParams contém os parâmetros do SendMessageBatch.
+type SendMessageBatchParams struct {
+	QueueName string
+	QueueURL  string
+	Entries   []BatchSendEntry
+}
+
+// SendMessageBatchResult contém entries bem-sucedidas e falhadas.
+type SendMessageBatchResult struct {
+	Successful []BatchResultEntry
+	Failed     []BatchFailureEntry
+}
+
+// SendMessageBatch publica até 10 mensagens em uma fila em uma única chamada.
+//
+// Comportamento AWS:
+//
+//   - 1 ≤ len(Entries) ≤ 10.
+//   - Ids únicos dentro do batch.
+//   - Soma dos bodies ≤ 256 KiB.
+//   - Filas FIFO: cada entry precisa de MessageGroupId, DelaySeconds=0.
+//   - Partial success: falhas per-entry vão em Failed[] (BatchResultError code),
+//     não falham o batch inteiro.
+//
+// Validações a nível de batch (retornam erro único, sem entries processadas):
+//   - QueueName ausente
+//   - 0 entries → EmptyBatchRequest
+//   - >10 entries → TooManyEntriesInBatch
+//   - Ids duplicados → BatchEntryIdsNotDistinct
+//   - Soma bodies > 256 KiB → MessageTooLarge
+func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatchParams) (*SendMessageBatchResult, error) {
+	if params == nil || len(params.Entries) == 0 {
+		return nil, &AWSError{
+			Code:    ErrCodeEmptyBatchRequest,
+			Message: "Entries deve conter ao menos 1 entry",
+		}
+	}
+	if len(params.Entries) > MaxBatchEntries {
+		return nil, &AWSError{
+			Code:    ErrCodeTooManyEntriesInBatch,
+			Message: fmt.Sprintf("Entries excede máximo de %d", MaxBatchEntries),
+		}
+	}
+
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+
+	// Valida Ids únicos dentro do batch.
+	seenIds := make(map[string]bool, len(params.Entries))
+	totalBodyBytes := 0
+	for i, e := range params.Entries {
+		if e.Id == "" {
+			return nil, &AWSError{
+				Code:    ErrCodeInvalidParameterValue,
+				Message: fmt.Sprintf("Entries[%d].Id é obrigatório", i),
+			}
+		}
+		if seenIds[e.Id] {
+			return nil, &AWSError{
+				Code:    ErrCodeBatchEntryIdsNotDistinct,
+				Message: fmt.Sprintf("Entries contém Ids duplicados: %q", e.Id),
+			}
+		}
+		seenIds[e.Id] = true
+		totalBodyBytes += len(e.MessageBody)
+	}
+	if totalBodyBytes > MaxBatchTotalBytes {
+		return nil, &AWSError{
+			Code:    ErrCodeMessageTooLarge,
+			Message: fmt.Sprintf("Soma dos bodies excede %d bytes", MaxBatchTotalBytes),
+		}
+	}
+
+	// Carrega fila para validar FIFO.
+	q, err := s.storage.Queues().GetQueue(ctx, params.QueueName)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &SendMessageBatchResult{
+		Successful: make([]BatchResultEntry, 0, len(params.Entries)),
+		Failed:     make([]BatchFailureEntry, 0),
+	}
+
+	for _, e := range params.Entries {
+		// Validações per-entry que falham entries individuais (não o batch inteiro).
+		if e.MessageBody == "" {
+			result.Failed = append(result.Failed, BatchFailureEntry{
+				Id:          e.Id,
+				Code:        ErrCodeMissingParameter,
+				Message:     "MessageBody é obrigatório",
+				SenderFault: true,
+			})
+			continue
+		}
+		if e.DelaySeconds < 0 || e.DelaySeconds > 900 {
+			result.Failed = append(result.Failed, BatchFailureEntry{
+				Id:          e.Id,
+				Code:        ErrCodeInvalidParameterValue,
+				Message:     "DelaySeconds deve estar em [0, 900]",
+				SenderFault: true,
+			})
+			continue
+		}
+		if q.FIFO {
+			if e.DelaySeconds > 0 {
+				result.Failed = append(result.Failed, BatchFailureEntry{
+					Id:          e.Id,
+					Code:        ErrCodeInvalidParameterValue,
+					Message:     "DelaySeconds não é suportado em filas FIFO",
+					SenderFault: true,
+				})
+				continue
+			}
+			if e.MessageGroupId == "" {
+				result.Failed = append(result.Failed, BatchFailureEntry{
+					Id:          e.Id,
+					Code:        ErrCodeMissingParameter,
+					Message:     "MessageGroupId é obrigatório em filas FIFO",
+					SenderFault: true,
+				})
+				continue
+			}
+		}
+
+		msg := &types.Message{
+			Body:                   e.MessageBody,
+			MessageAttributes:      maValueToTypes(e.MessageAttributes),
+			MessageGroupId:         e.MessageGroupId,
+			MessageDeduplicationId: e.MessageDeduplicationId,
+		}
+
+		saved, sendErr := s.storage.Messages().SendMessage(ctx, params.QueueName, msg)
+		if sendErr != nil {
+			awsErr := AsAWSError(sendErr)
+			result.Failed = append(result.Failed, BatchFailureEntry{
+				Id:          e.Id,
+				Code:        awsErr.Code,
+				Message:     awsErr.Message,
+				SenderFault: awsErr.IsSenderFault(),
+			})
+			continue
+		}
+
+		entry := BatchResultEntry{
+			Id:        e.Id,
+			MessageID: saved.ID,
+			MD5OfBody: saved.MD5OfBody,
+		}
+		if q.FIFO {
+			entry.SequenceNo = saved.ID
+		}
+		result.Successful = append(result.Successful, entry)
+	}
+
+	return result, nil
+}
+
+// SendMessageBatchParamsFromQuery normaliza Query → SendMessageBatchParams.
+//
+// Extrai QueueUrl e SendMessageBatchRequestEntry.N.Id/MessageBody/etc.
+func SendMessageBatchParamsFromQuery(params url.Values) *SendMessageBatchParams {
+	p := &SendMessageBatchParams{
+		QueueURL: params.Get("QueueUrl"),
+		QueueName: params.Get("QueueName"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+
+	entries := protocol.ExtractQuerySendMessageBatchEntries(params)
+	p.Entries = make([]BatchSendEntry, 0, len(entries))
+	for _, e := range entries {
+		p.Entries = append(p.Entries, BatchSendEntry{
+			Id:                     e.Id,
+			MessageBody:            e.MessageBody,
+			DelaySeconds:           e.DelaySeconds,
+			MessageGroupId:         e.MessageGroupId,
+			MessageDeduplicationId: e.MessageDeduplicationId,
+			MessageAttributes:      e.MessageAttributes,
+		})
+	}
+	return p
+}
+
+// SendMessageBatchParamsFromJSON normaliza JSON → SendMessageBatchParams.
+func SendMessageBatchParamsFromJSON(params map[string]any) *SendMessageBatchParams {
+	p := &SendMessageBatchParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+
+	entries := protocol.ExtractJSONSendMessageBatchEntries(params)
+	p.Entries = make([]BatchSendEntry, 0, len(entries))
+	for _, e := range entries {
+		p.Entries = append(p.Entries, BatchSendEntry{
+			Id:                     e.Id,
+			MessageBody:            e.MessageBody,
+			DelaySeconds:           e.DelaySeconds,
+			MessageGroupId:         e.MessageGroupId,
+			MessageDeduplicationId: e.MessageDeduplicationId,
+			MessageAttributes:      e.MessageAttributes,
+		})
+	}
+	return p
+}
+
+// --- DeleteMessageBatch ---
+
+// DeleteMessageBatchParams contém os parâmetros.
+type DeleteMessageBatchParams struct {
+	QueueName string
+	QueueURL  string
+	Entries   []BatchDeleteEntry
+}
+
+// DeleteMessageBatchResult contém entries bem-sucedidas e falhadas.
+type DeleteMessageBatchResult struct {
+	Successful []BatchResultEntry // só com Id preenchido
+	Failed     []BatchFailureEntry
+}
+
+// DeleteMessageBatch remove até 10 mensagens em uma única chamada.
+//
+// Mesmas restrições de SendMessageBatch (10 entries, Ids únicos).
+// Cada entry é deletada independentemente — falha em uma não afeta as outras.
+func (s *Service) DeleteMessageBatch(ctx context.Context, params *DeleteMessageBatchParams) (*DeleteMessageBatchResult, error) {
+	if params == nil || len(params.Entries) == 0 {
+		return nil, &AWSError{
+			Code:    ErrCodeEmptyBatchRequest,
+			Message: "Entries deve conter ao menos 1 entry",
+		}
+	}
+	if len(params.Entries) > MaxBatchEntries {
+		return nil, &AWSError{
+			Code:    ErrCodeTooManyEntriesInBatch,
+			Message: fmt.Sprintf("Entries excede máximo de %d", MaxBatchEntries),
+		}
+	}
+
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+
+	seenIds := make(map[string]bool, len(params.Entries))
+	for i, e := range params.Entries {
+		if e.Id == "" {
+			return nil, &AWSError{
+				Code:    ErrCodeInvalidParameterValue,
+				Message: fmt.Sprintf("Entries[%d].Id é obrigatório", i),
+			}
+		}
+		if seenIds[e.Id] {
+			return nil, &AWSError{
+				Code:    ErrCodeBatchEntryIdsNotDistinct,
+				Message: fmt.Sprintf("Entries contém Ids duplicados: %q", e.Id),
+			}
+		}
+		seenIds[e.Id] = true
+	}
+
+	result := &DeleteMessageBatchResult{
+		Successful: make([]BatchResultEntry, 0, len(params.Entries)),
+		Failed:     make([]BatchFailureEntry, 0),
+	}
+
+	for _, e := range params.Entries {
+		if e.ReceiptHandle == "" {
+			result.Failed = append(result.Failed, BatchFailureEntry{
+				Id:          e.Id,
+				Code:        ErrCodeMissingParameter,
+				Message:     "ReceiptHandle é obrigatório",
+				SenderFault: true,
+			})
+			continue
+		}
+
+		if err := s.storage.Messages().DeleteMessage(ctx, params.QueueName, e.ReceiptHandle); err != nil {
+			awsErr := AsAWSError(err)
+			result.Failed = append(result.Failed, BatchFailureEntry{
+				Id:          e.Id,
+				Code:        awsErr.Code,
+				Message:     awsErr.Message,
+				SenderFault: awsErr.IsSenderFault(),
+			})
+			continue
+		}
+
+		result.Successful = append(result.Successful, BatchResultEntry{Id: e.Id})
+	}
+
+	return result, nil
+}
+
+// DeleteMessageBatchParamsFromQuery normaliza Query → DeleteMessageBatchParams.
+func DeleteMessageBatchParamsFromQuery(params url.Values) *DeleteMessageBatchParams {
+	p := &DeleteMessageBatchParams{
+		QueueURL:  params.Get("QueueUrl"),
+		QueueName: params.Get("QueueName"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+
+	entries := protocol.ExtractQueryDeleteMessageBatchEntries(params)
+	p.Entries = make([]BatchDeleteEntry, 0, len(entries))
+	for _, e := range entries {
+		p.Entries = append(p.Entries, BatchDeleteEntry{
+			Id:                e.Id,
+			ReceiptHandle:     e.ReceiptHandle,
+			VisibilityTimeout: e.VisibilityTimeout,
+		})
+	}
+	return p
+}
+
+// DeleteMessageBatchParamsFromJSON normaliza JSON → DeleteMessageBatchParams.
+func DeleteMessageBatchParamsFromJSON(params map[string]any) *DeleteMessageBatchParams {
+	p := &DeleteMessageBatchParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+
+	entries := protocol.ExtractJSONDeleteMessageBatchEntries(params)
+	p.Entries = make([]BatchDeleteEntry, 0, len(entries))
+	for _, e := range entries {
+		p.Entries = append(p.Entries, BatchDeleteEntry{
+			Id:                e.Id,
+			ReceiptHandle:     e.ReceiptHandle,
+			VisibilityTimeout: e.VisibilityTimeout,
+		})
+	}
+	return p
 }
 
 // --- SendMessage ---
