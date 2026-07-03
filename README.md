@@ -33,51 +33,55 @@ A camada de API é um **shim em Go** (`shimd`) que implementa:
 
 **Fase 1 (SQS Standard — leitura/metadados) ✅ completa.**
 **Fase 2 (SQS Standard — operações de mensagem) ✅ completa.**
+**Fase 3 (Batch + FIFO completo) ✅ completa.**
 
-### Operações SQS implementadas (11/11 do Standard)
+### Operações SQS implementadas (13/13 do Standard)
 
-| Operação                | Protocolo Query | Protocolo JSON | Testes E2E |
-|-------------------------|:--------------:|:--------------:|:----------:|
-| `CreateQueue`           | ✅             | ✅             | ✅         |
-| `GetQueueUrl`           | ✅             | ✅             | ✅         |
-| `GetQueueAttributes`    | ✅             | ✅             | ✅         |
-| `ListQueues`            | ✅             | ✅             | ✅         |
-| `DeleteQueue`           | ✅             | ✅             | ✅         |
-| `SetQueueAttributes`    | ✅             | ✅             | ✅         |
-| `SendMessage`           | ✅             | ✅             | ✅         |
-| `ReceiveMessage`        | ✅             | ✅             | ✅         |
-| `DeleteMessage`         | ✅             | ✅             | ✅         |
-| `ChangeMessageVisibility`| ✅            | ✅             | ✅         |
-| `PurgeQueue`            | ✅             | ✅             | ✅         |
+| Operação                 | Protocolo Query | Protocolo JSON | Testes E2E |
+|--------------------------|:--------------:|:--------------:|:----------:|
+| `CreateQueue`            | ✅             | ✅             | ✅         |
+| `GetQueueUrl`            | ✅             | ✅             | ✅         |
+| `GetQueueAttributes`     | ✅             | ✅             | ✅         |
+| `ListQueues`             | ✅             | ✅             | ✅         |
+| `DeleteQueue`            | ✅             | ✅             | ✅         |
+| `SetQueueAttributes`     | ✅             | ✅             | ✅         |
+| `SendMessage`            | ✅             | ✅             | ✅         |
+| `ReceiveMessage`         | ✅             | ✅             | ✅         |
+| `DeleteMessage`          | ✅             | ✅             | ✅         |
+| `ChangeMessageVisibility`| ✅             | ✅             | ✅         |
+| `PurgeQueue`             | ✅             | ✅             | ✅         |
+| `SendMessageBatch`       | ✅             | ✅             | ✅         |
+| `DeleteMessageBatch`     | ✅             | ✅             | ✅         |
 
-**Cobertura de testes:** 27/27 passando (12 smoke + 15 messages) em ~14s contra
-shim rodando em docker-compose com NATS JetStream 2.10 + MinIO.
+**Cobertura de testes:** 45/45 passando (12 smoke + 15 messages + 18 batch)
+em ~18s contra shim rodando em docker-compose com NATS JetStream 2.10 + MinIO.
 
-### O que já funciona
+### Funcionalidades SQS implementadas
 
-- Bootstrap do projeto (Go module, docker-compose dev, Makefile, CI com 4 jobs)
-- HTTP server com middleware (logging, recovery, métricas Prometheus, tracing OTel)
-- Cliente NATS JetStream com reconexão automática + cache de pending msgs
-- Persistência de metadados em JetStream KV (`queue_meta`)
-- Sanitização de nomes de fila → subjects NATS
-- DUAL protocol AWS (Query form+XML e JSON 1.0 simultaneamente)
-- DUAL format JSON 1.0 para `Attributes` (array E map compacto boto3 ≥1.40)
-- Round-trip de `MessageAttribute` preservando `DataType`: String, Number,
-  Binary (base64), String.List
-- Long-polling nativo via `FetchMaxWait` do JetStream (substitui `WaitTimeSeconds`)
-- Visibility timeout via `AckWait` + `NakWithDelay`
-- Receipt handles versionados (`rh1:<consumer>:<seq>`) com cache de ack
-- Consumer durável único por fila (AckExplicitPolicy, MaxAckPending=1000)
-- FIFO queues parcialmente funcional (MessageGroupId validado + SequenceNumber)
-- 18 commits granulares em português, cada um com mensagem detalhada
+- **Dual protocol**: Query (form+XML) E JSON 1.0 simultaneamente, mesmo response
+- **Dual format JSON 1.0**: `Attributes` array E map compacto (boto3 ≥1.40)
+- **MessageAttribute round-trip**: DataType preservado (String, Number, Binary base64, String.List)
+- **Long-polling nativo** via `FetchMaxWait` do JetStream
+- **Visibility timeout** via `AckWait` + `NakWithDelay`
+- **Receipt handles versionados** `rh1:<consumer>:<seq>` com cache de ack
+- **Consumer durável único por fila** (AckExplicitPolicy, MaxAckPending=1000)
+- **FIFO queues completas**:
+  - MessageGroupId particiona subject NATS → ordering dentro do grupo preservado
+  - MessageDeduplicationId via Nats-Msg-Id (dedup explícito)
+  - ContentBasedDeduplication via SHA-256(body) como Nats-Msg-Id (dedup implícito)
+  - SequenceNumber retornado em cada send (MessageId = stream sequence)
+- **Batch operations**:
+  - SendMessageBatch até 10 entries com partial success (Failed[] por entry)
+  - DeleteMessageBatch até 10 entries com partial success
+  - Validação de Ids únicos (BatchEntryIdsNotDistinct)
+  - Validação de limite (TooManyEntriesInBatch)
+  - Validação de soma de bodies ≤ 256 KiB
+- **31 commits granulares em português**, cada um com mensagem detalhada
 
 ### O que vem a seguir
 
-- **Fase 3 — Batch + FIFO completo:**
-  - `SendMessageBatch`, `DeleteMessageBatch`
-  - FIFO ordering completo (preservação de ordem dentro do grupo)
 - **Fase 4 — SNS:** `CreateTopic`, `Subscribe` (sqs/http/https), `Publish`,
-  `ListSubscriptions`, fan-out com filter policy
+  `ListSubscriptions`, `Unsubscribe`, `DeleteTopic`, fan-out com filter policy
 - **Fase 5 — Auth real:** Verificação SigV4 + IAM store (policy JSON evaluation) + CLI `shimctl`
 - **Fase 6 — Provisioning:** Terraform módulos production-ready (network,
   compute, broker, api, observability, objectstore)

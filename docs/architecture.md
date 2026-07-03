@@ -4,8 +4,13 @@ Este documento descreve a arquitetura do `generic_queue`, um clone
 auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go
 sobre NATS JetStream.
 
-> Status: Fase 1 (Semana 1) — operação SQS CreateQueue/GetQueueUrl/
-> GetQueueAttributes/ListQueues/DeleteQueue funcionais via boto3 e aws-cli.
+> Status: Fase 3 completa — 13 operações SQS Standard funcionais
+> (CreateQueue/Get/List/Delete + SendMessage/ReceiveMessage/DeleteMessage/
+> ChangeMessageVisibility/PurgeQueue + SetQueueAttributes + SendMessageBatch/
+> DeleteMessageBatch), todas com dual protocol (Query+JSON), todas com
+> testes E2E (45/45 passando) via boto3 oficial Python.
+> Inclui FIFO queues completas: MessageGroupId, MessageDeduplicationId,
+> ContentBasedDeduplication, SequenceNumber, ordering within group.
 
 ## Visão geral
 
@@ -108,19 +113,33 @@ Erros AWS formatados com códigos oficiais (`QueueDoesNotExist`, etc.)
 
 Lógica de negócio SQS. Conhece o protocolo AWS mas não o broker.
 
-Operações atuais (Fase 1, Semana 1):
+Operações atuais (Fase 3 completa — 13/13 operações do SQS Standard):
 
-- **CreateQueue** — idempotente, valida nome e atributos
-- **GetQueueUrl** — devolve URL canônica
-- **GetQueueAttributes** — lista atributos (All ou filtrados)
-- **ListQueues** — com prefix filter
-- **DeleteQueue** — idempotente, aceita QueueName ou QueueUrl
+- **Queue management**: CreateQueue, GetQueueUrl, GetQueueAttributes,
+  ListQueues, DeleteQueue, SetQueueAttributes
+- **Message operations**: SendMessage, ReceiveMessage (long-poll),
+  DeleteMessage, ChangeMessageVisibility, PurgeQueue
+- **Batch operations**: SendMessageBatch (≤10 entries, partial success),
+  DeleteMessageBatch (≤10 entries, partial success)
 
 Erros:
 
 - `QueueDoesNotExist`, `QueueAlreadyExists`, `InvalidParameterValue`,
-  `MissingParameter`, `OverLimit`, `UnsupportedOperation`, `InternalError`
-- Tradução storage → AWS via `AsAWSError(err)`
+  `MissingParameter`, `OverLimit`, `MessageTooLarge`,
+  `ReceiptHandleIsInvalid`, `BatchEntryIdsNotDistinct`,
+  `TooManyEntriesInBatch`, `EmptyBatchRequest`, `UnsupportedOperation`,
+  `InternalError`
+- Tradução storage → AWS via `AsAWSError(err)` com `errors.As` para
+  erros tipados (ErrInvalidReceiptHandleT, ErrMessageTooLargeT, etc.)
+
+FIFO queues (Fase 3):
+
+- MessageGroupId particiona subject NATS (`q.<queue>.<groupId>`) →
+  ordering within group preservado nativamente
+- MessageDeduplicationId via Nats-Msg-Id (dedup explícito em janela de 2min)
+- ContentBasedDeduplication via SHA-256(body) como Nats-Msg-Id
+  (dedup implícito em janela de 2min)
+- SequenceNumber retornado em cada send (MessageId = stream sequence)
 
 ### 5. `sns/` — SNS service [Semana 4]
 
@@ -265,41 +284,77 @@ Mapeamentos críticos:
 
 ## Roadmap
 
-### Fase 1 — MVP funcional (Semanas 1-4)
+### Fase 1 — SQS Standard leitura/metadados ✅ completa
 
-- [x] Semana 1: CreateQueue/Get/List/Delete com persistência via KV
-- [ ] Semana 2: SendMessage/ReceiveMessage (long-poll) + DeleteMessage
-- [ ] Semana 3: ChangeMessageVisibility + PurgeQueue + Visibility scheduler
-- [ ] Semana 4: SNS fan-out + SigV4 + IAM store
+- [x] Semana 1: CreateQueue/GetQueueUrl/GetQueueAttributes/ListQueues/DeleteQueue
+      com persistência via JetStream KV `queue_meta`
+- [x] Semana 2: SetQueueAttributes + Validação de ranges de atributos
 
-### Fase 2 — Produção (Semanas 5-6)
+### Fase 2 — SQS Standard operações de mensagem ✅ completa
 
-- [ ] Terraform modules (network, broker, api, observability)
+- [x] SendMessage com headers MessageAttributes (X-Sqs-Atr-<name>)
+- [x] ReceiveMessage com long-poll via FetchMaxWait
+- [x] DeleteMessage com idempotência
+- [x] ChangeMessageVisibility via NakWithDelay
+- [x] PurgeQueue via stream purge
+- [x] Receipt handles versionados (rh1:<consumer>:<seq>)
+- [x] Consumer durável único por fila (AckExplicitPolicy, MaxAckPending=1000)
+- [x] Cache de pending msgs em memória (sync.RWMutex)
+
+### Fase 3 — Batch + FIFO completo ✅ completa
+
+- [x] SendMessageBatch até 10 entries com partial success
+- [x] DeleteMessageBatch até 10 entries com partial success
+- [x] Validações: TooManyEntriesInBatch, BatchEntryIdsNotDistinct, EmptyBatchRequest
+- [x] Validação de soma de bodies ≤ 256 KiB
+- [x] FIFO MessageGroupId preserva ordem dentro do grupo
+- [x] FIFO MessageDeduplicationId via Nats-Msg-Id
+- [x] FIFO ContentBasedDeduplication via SHA-256(body) como Nats-Msg-Id
+- [x] FIFO SequenceNumber retornado em cada send
+
+### Fase 4 — SNS (próximo)
+
+- [ ] CreateTopic
+- [ ] Subscribe (sqs/http/https)
+- [ ] Publish
+- [ ] ListSubscriptions
+- [ ] Unsubscribe / DeleteTopic
+- [ ] Fan-out com filter policy
+- [ ] Job server assíncrono para HTTP/HTTPS subscriptions
+
+### Fase 5 — Auth + IAM real
+
+- [ ] Verificação SigV4 com parsing de credential string
+- [ ] IAM store (file + DynamoDB-like table)
+- [ ] Policy JSON evaluation (resource, action, effect)
+- [ ] CLI shimctl para gerenciar filas/topics/IAM
+
+### Fase 6 — Provisioning
+
+- [ ] Terraform modules (network, compute, broker, api, observability)
 - [ ] HA cluster NATS 3 nós + snapshots S3
 - [ ] mTLS entre shim e broker
-- [ ] Prometheus + Grafana + Loki + OTel
+
+### Fase 7 — Hardening produção
+
+- [ ] Prometheus + Grafana + Loki + OTel exporters
 - [ ] Runbooks + disaster recovery
-
-### Fase 3 — Features avançadas (Semanas 7+)
-
-- [ ] SQS FIFO com MessageGroupId
-- [ ] Batch operations
-- [ ] Subscription filter policies
-- [ ] DLQ automático
-- [ ] Dead-letter handling
+- [ ] SLOs + alerting rules
 - [ ] Multi-region replication
 
 ## Limitações atuais
 
-### Conhecidas (aceitas para Fase 1)
+### Conhecidas (aceitas para MVP)
 
 - **Não SigV4 nem IAM** — qualquer credencial aceita (AUTH_MODE=off)
-- **Não suporta ReceiveMessage/SendMessage** — ainda stub em storage
 - **Não suporta SNS** — stub retorna UnsupportedOperation
-- **Não suporta FIFO** — só standard queues
 - **Não tem cluster** — NATS single-node em dev
 - **Não tem observability de produção** — só stdout/log
 - **Não tem TLS** — HTTP plano, TLS termina no LB em prod
+- **Consumer único por fila** — múltiplos clients paralelos na mesma fila
+  não suportados (solução em prod: sharding por partition key)
+- **AproximateNumberOfMessages** é contado de `Stream.State.Msgs` (inclui
+  mensagens já acked — lag de update do JetStream)
 
 ### Performance
 
