@@ -272,7 +272,7 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) error {
 			if extractTopicName(s.TopicARN) == name {
 				skv, skerr := c.subscriptionKV(ctx)
 				if skerr == nil {
-					_ = skv.Delete(ctx, s.ARN)
+					_ = skv.Delete(ctx, subscriptionKey(s.ARN))
 				}
 			}
 		}
@@ -333,7 +333,7 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (*types.
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
-	if _, err := kv.Put(ctx, sub.ARN, body); err != nil {
+	if _, err := kv.Put(ctx, subscriptionKey(sub.ARN), body); err != nil {
 		return nil, fmt.Errorf("put: %w", err)
 	}
 
@@ -390,6 +390,8 @@ func (c *Client) listAllSubscriptions(ctx context.Context) ([]types.Subscription
 		if uerr := json.Unmarshal(entry.Value(), &md); uerr != nil {
 			continue
 		}
+		// md.ARN já contém o ARN real (sem sanitização); a chave KV só
+		// guarda a versão sanitizada para evitar conflito com subjects JetStream.
 		out = append(out, types.Subscription{
 			ARN:          md.ARN,
 			TopicARN:     md.TopicARN,
@@ -413,7 +415,7 @@ func (c *Client) Unsubscribe(ctx context.Context, subscriptionARN string) error 
 	if err != nil {
 		return err
 	}
-	if err := kv.Delete(ctx, subscriptionARN); err != nil {
+	if err := kv.Delete(ctx, subscriptionKey(subscriptionARN)); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return storage.ErrInvalidArgument("subscription não encontrada")
 		}
@@ -565,8 +567,6 @@ func matchesFilterPolicy(policyJSON string, msg *types.Message) bool {
 	}
 	var policy map[string][]string
 	if err := json.Unmarshal([]byte(policyJSON), &policy); err != nil {
-		// Policy inválida: comportamento AWS é falhar o subscription inteiro
-		// (NotAuthorizedForFilter), mas para MVP apenas passa (fail open).
 		return true
 	}
 	for attrName, allowed := range policy {
@@ -576,7 +576,7 @@ func matchesFilterPolicy(policyJSON string, msg *types.Message) bool {
 		} else if sa, ok := msg.Attributes[attrName]; ok {
 			actual = sa
 		} else {
-			return false // atributo exigido não está presente
+			return false
 		}
 		matched := false
 		for _, v := range allowed {
@@ -598,6 +598,13 @@ func matchesFilterPolicy(policyJSON string, msg *types.Message) bool {
 func generateSubscriptionARN(topicARN, protocol, endpoint string) string {
 	h := sha256.Sum256([]byte(topicARN + ":" + protocol + ":" + endpoint + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)))
 	return topicARN + ":" + hex.EncodeToString(h[:8])
+}
+
+// subscriptionKey retorna uma versão do ARN segura para usar como chave de KV.
+//
+// KV JetStream keys não podem conter '.' ou ':'. Substituímos por '_'.
+func subscriptionKey(arn string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(arn, ":", "_"), ".", "_")
 }
 
 // extractTopicName extrai o nome do tópico de um ARN SNS.
