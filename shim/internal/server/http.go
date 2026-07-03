@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -135,6 +137,18 @@ func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 		s.handleListQueuesQuery(w, r, params)
 	case protocol.ActionDeleteQueue:
 		s.handleDeleteQueueQuery(w, r, params)
+	case protocol.ActionSendMessage:
+		s.handleSendMessageQuery(w, r, params)
+	case protocol.ActionReceiveMessage:
+		s.handleReceiveMessageQuery(w, r, params)
+	case protocol.ActionDeleteMessage:
+		s.handleDeleteMessageQuery(w, r, params)
+	case protocol.ActionChangeMessageVisibility:
+		s.handleChangeMessageVisibilityQuery(w, r, params)
+	case protocol.ActionPurgeQueue:
+		s.handlePurgeQueueQuery(w, r, params)
+	case protocol.ActionSetQueueAttributes:
+		s.handleSetQueueAttributesQuery(w, r, params)
 	default:
 		writeSQSFatalError(w, "UnsupportedOperation",
 			fmt.Sprintf("Action %q ainda não implementada", action), newRequestID())
@@ -160,6 +174,18 @@ func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 		s.handleListQueuesJSON(w, r, params)
 	case protocol.ActionDeleteQueue:
 		s.handleDeleteQueueJSON(w, r, params)
+	case protocol.ActionSendMessage:
+		s.handleSendMessageJSON(w, r, params)
+	case protocol.ActionReceiveMessage:
+		s.handleReceiveMessageJSON(w, r, params)
+	case protocol.ActionDeleteMessage:
+		s.handleDeleteMessageJSON(w, r, params)
+	case protocol.ActionChangeMessageVisibility:
+		s.handleChangeMessageVisibilityJSON(w, r, params)
+	case protocol.ActionPurgeQueue:
+		s.handlePurgeQueueJSON(w, r, params)
+	case protocol.ActionSetQueueAttributes:
+		s.handleSetQueueAttributesJSON(w, r, params)
 	default:
 		writeSQSJSONFatalError(w, "UnsupportedOperation",
 			fmt.Sprintf("Action %q ainda não implementada", action))
@@ -441,6 +467,348 @@ func (s *Server) handleDeleteQueueJSON(w http.ResponseWriter, r *http.Request, p
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
 	// AWS JSON devolve {} em DeleteQueue bem-sucedido.
+	w.Write([]byte(`{}`))
+}
+
+// --- SendMessage ---
+
+func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	res, err := s.handlers.SQS.SendMessage(r.Context(), sqs.SendMessageParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+
+	type result struct {
+		XMLName    xml.Name `xml:"SendMessageResult"`
+		MessageID  string   `xml:"MessageId"`
+		MD5OfBody  string   `xml:"MD5OfMessage"`
+		SequenceNo string   `xml:"SequenceNumber,omitempty"`
+	}
+	type response struct {
+		XMLName  xml.Name                  `xml:"SendMessageResponse"`
+		Xmlns    string                    `xml:"xmlns,attr"`
+		Result   result
+		Metadata protocol.ResponseMetadata
+	}
+
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	resp := response{
+		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Result: result{
+			MessageID:  res.MessageID,
+			MD5OfBody:  res.MD5OfBody,
+			SequenceNo: res.SequenceNo,
+		},
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+func (s *Server) handleSendMessageJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	res, err := s.handlers.SQS.SendMessage(r.Context(), sqs.SendMessageParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+	protocol.EncodeSQSJSONResponse(w, map[string]string{
+		"MessageId":      res.MessageID,
+		"MD5OfMessage":   res.MD5OfBody,
+		"SequenceNumber": res.SequenceNo,
+	})
+}
+
+// --- ReceiveMessage ---
+
+func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	res, err := s.handlers.SQS.ReceiveMessage(r.Context(), sqs.ReceiveMessageParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+
+	type msgAttr struct {
+		Name  string `xml:"Name"`
+		Value string `xml:"Value"`
+	}
+	type msgMA struct {
+		Name       string `xml:"Name"`
+		Value      string `xml:"Value,omitempty"`
+		ValueBin   []byte `xml:"BinaryValue,omitempty"`
+	}
+	type msg struct {
+		XMLName         xml.Name           `xml:"Message"`
+		MessageID       string             `xml:"MessageId"`
+		ReceiptHandle   string             `xml:"ReceiptHandle"`
+		MD5OfBody       string             `xml:"MD5OfBody"`
+		Body            string             `xml:"Body"`
+		Attribute       []msgAttr          `xml:"Attribute"`
+		MessageMA       []msgMA            `xml:"MessageAttribute"`
+	}
+	type result struct {
+		XMLName xml.Name `xml:"ReceiveMessageResult"`
+		Message []msg
+	}
+	type response struct {
+		XMLName  xml.Name                  `xml:"ReceiveMessageResponse"`
+		Xmlns    string                    `xml:"xmlns,attr"`
+		Result   result
+		Metadata protocol.ResponseMetadata
+	}
+
+	out := make([]msg, 0, len(res.Messages))
+	for _, m := range res.Messages {
+		mx := msg{
+			MessageID:     m.ID,
+			ReceiptHandle: m.ReceiptHandle,
+			MD5OfBody:     m.MD5OfBody,
+			Body:          m.Body,
+		}
+		// Atributos ordenados.
+		keys := make([]string, 0, len(m.Attributes))
+		for k := range m.Attributes {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			mx.Attribute = append(mx.Attribute, msgAttr{Name: k, Value: m.Attributes[k]})
+		}
+		// MessageAttributes ordenadas.
+		maKeys := make([]string, 0, len(m.MessageAttributes))
+		for k := range m.MessageAttributes {
+			maKeys = append(maKeys, k)
+		}
+		sort.Strings(maKeys)
+		for _, k := range maKeys {
+			attr := m.MessageAttributes[k]
+			switch attr.DataType {
+			case "Binary":
+				mx.MessageMA = append(mx.MessageMA, msgMA{Name: k, ValueBin: attr.BinaryValue})
+			default:
+				mx.MessageMA = append(mx.MessageMA, msgMA{Name: k, Value: attr.StringValue})
+			}
+		}
+		out = append(out, mx)
+	}
+
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	resp := response{
+		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Result:   result{Message: out},
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+func (s *Server) handleReceiveMessageJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	res, err := s.handlers.SQS.ReceiveMessage(r.Context(), sqs.ReceiveMessageParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+
+	out := make([]map[string]any, 0, len(res.Messages))
+	for _, m := range res.Messages {
+		mx := map[string]any{
+			"MessageId":     m.ID,
+			"ReceiptHandle": m.ReceiptHandle,
+			"MD5OfBody":     m.MD5OfBody,
+			"Body":          m.Body,
+			"Attributes":    m.Attributes,
+		}
+		// MessageAttributes no AWS JSON 1.0 é um MAP:
+		// {"foo": {"DataType":"String","StringValue":"bar"}, ...}
+		ma := make(map[string]map[string]any, len(m.MessageAttributes))
+		for k, v := range m.MessageAttributes {
+			entry := map[string]any{"DataType": v.DataType}
+			switch v.DataType {
+			case "Binary":
+				entry["BinaryValue"] = base64.StdEncoding.EncodeToString(v.BinaryValue)
+			case "String.List":
+				entry["StringListValues"] = strings.Split(v.StringValue, "|")
+			default:
+				entry["StringValue"] = v.StringValue
+			}
+			ma[k] = entry
+		}
+		mx["MessageAttributes"] = ma
+		out = append(out, mx)
+	}
+
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+	protocol.EncodeSQSJSONResponse(w, map[string]any{"Messages": out})
+}
+
+// --- DeleteMessage ---
+
+func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	err := s.handlers.SQS.DeleteMessage(r.Context(), sqs.DeleteMessageParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+	type response struct {
+		XMLName  xml.Name                  `xml:"DeleteMessageResponse"`
+		Xmlns    string                    `xml:"xmlns,attr"`
+		Metadata protocol.ResponseMetadata
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	resp := response{
+		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+func (s *Server) handleDeleteMessageJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	err := s.handlers.SQS.DeleteMessage(r.Context(), sqs.DeleteMessageParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{}`))
+}
+
+// --- ChangeMessageVisibility ---
+
+func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	err := s.handlers.SQS.ChangeMessageVisibility(r.Context(), sqs.ChangeMessageVisibilityParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+	type response struct {
+		XMLName  xml.Name                  `xml:"ChangeMessageVisibilityResponse"`
+		Xmlns    string                    `xml:"xmlns,attr"`
+		Metadata protocol.ResponseMetadata
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	resp := response{
+		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+func (s *Server) handleChangeMessageVisibilityJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	err := s.handlers.SQS.ChangeMessageVisibility(r.Context(), sqs.ChangeMessageVisibilityParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{}`))
+}
+
+// --- PurgeQueue ---
+
+func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	err := s.handlers.SQS.PurgeQueue(r.Context(), sqs.PurgeQueueParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+	type response struct {
+		XMLName  xml.Name                  `xml:"PurgeQueueResponse"`
+		Xmlns    string                    `xml:"xmlns,attr"`
+		Metadata protocol.ResponseMetadata
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	resp := response{
+		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+func (s *Server) handlePurgeQueueJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	err := s.handlers.SQS.PurgeQueue(r.Context(), sqs.PurgeQueueParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{}`))
+}
+
+// --- SetQueueAttributes ---
+
+func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	err := s.handlers.SQS.SetQueueAttributes(r.Context(), sqs.SetQueueAttributesParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+	type response struct {
+		XMLName  xml.Name                  `xml:"SetQueueAttributesResponse"`
+		Xmlns    string                    `xml:"xmlns,attr"`
+		Metadata protocol.ResponseMetadata
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	resp := response{
+		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	err := s.handlers.SQS.SetQueueAttributes(r.Context(), sqs.SetQueueAttributesParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{}`))
 }
 
