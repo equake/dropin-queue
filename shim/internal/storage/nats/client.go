@@ -52,7 +52,7 @@ type Client struct {
 	mu      sync.RWMutex
 	streams map[string]jetstream.Stream // cache de streams para evitar lookups repetidos
 	prefix  string                      // prefixo adicional para multi-tenant (futuro)
-	kvCache jetstream.KeyValue          // cache do bucket de metadados (lazy init)
+	kvCache *lazyKVCache                // cache do bucket de metadados (lazy init thread-safe)
 
 	// consumers é o cache de consumers duráveis por fila (chave: consumer
 	// name). Evita CreateOrUpdateConsumer (1 RTT ao broker) a cada
@@ -71,11 +71,10 @@ type Client struct {
 	// topicMaxAge é a retenção do stream de arquivo dos tópicos SNS.
 	topicMaxAge time.Duration
 
-	// topicKVCache é o KV bucket de metadados dos tópicos (lazy init).
-	topicKVCache jetstream.KeyValue
-
-	// subKVCache é o KV bucket de metadados das subscriptions (lazy init).
-	subKVCache jetstream.KeyValue
+	// topicKVCache é o KV bucket de metadados dos tópicos (lazy init thread-safe).
+	topicKVCache *lazyKVCache
+	// subscriptionKVCache é o KV bucket de inscrições (lazy init thread-safe).
+	subscriptionKVCache *lazyKVCache
 }
 
 // cachedConsumer é uma entrada do cache de consumers duráveis.
@@ -184,14 +183,17 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 	}
 
 	c := &Client{
-		nc:            nc,
-		js:            js,
-		streams:       make(map[string]jetstream.Stream),
-		prefix:        opts.Prefix,
-		consumers:     make(map[string]cachedConsumer),
-		replicas:      replicas,
-		maxAckPending: maxAckPending,
-		topicMaxAge:   topicMaxAge,
+		nc:                  nc,
+		js:                  js,
+		streams:             make(map[string]jetstream.Stream),
+		prefix:              opts.Prefix,
+		kvCache:             &lazyKVCache{},
+		topicKVCache:        &lazyKVCache{},
+		subscriptionKVCache: &lazyKVCache{},
+		consumers:           make(map[string]cachedConsumer),
+		replicas:            replicas,
+		maxAckPending:       maxAckPending,
+		topicMaxAge:         topicMaxAge,
 	}
 
 	// Valida que o account tem JetStream habilitado.

@@ -92,16 +92,15 @@ func sanitizeStreamName(s string) string {
 // Além do stream, persiste metadados em KV bucket (queue_meta) para que
 // atributos como VisibilityTimeout sobrevivam ao restart e sejam
 // recuperáveis via GetQueue.
-func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("create_queue", nil, time.Since(start)) }()
+func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (result *types.Queue, err error) {
+	defer observability.StartObserve("create_queue").Done(&err)
 
 	cfg := c.streamCfg(q)
 
 	// Tenta criar; se já existe, busca e devolve (idempotência SQS).
-	s, err := c.js.CreateStream(ctx, cfg)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
+	s, cerr := c.js.CreateStream(ctx, cfg)
+	if cerr != nil {
+		if errors.Is(cerr, jetstream.ErrStreamNameAlreadyInUse) {
 			// SQS é idempotente em CreateQueue — devolve a existente.
 			existing, gerr := c.js.Stream(ctx, cfg.Name)
 			if gerr != nil {
@@ -123,8 +122,7 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 			}
 			return &q2, nil
 		}
-		observability.ObserveStorage("create_queue", err, time.Since(start))
-		return nil, fmt.Errorf("create stream: %w", err)
+		return nil, fmt.Errorf("create stream: %w", cerr)
 	}
 
 	c.cacheStream(cfg.Name, s)
@@ -144,9 +142,9 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 	if visibility <= 0 {
 		visibility = 30
 	}
-	if _, err := c.ensureQueueConsumer(ctx, s, q.Name, visibility); err != nil {
+	if _, cerr := c.ensureQueueConsumer(ctx, s, q.Name, visibility); cerr != nil {
 		observability.L().Warn("falha ao pré-criar consumer da fila",
-			"queue", q.Name, "err", err.Error())
+			"queue", q.Name, "err", cerr.Error())
 	}
 
 	observability.L().Info("fila criada",
@@ -158,9 +156,8 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 }
 
 // ListQueues lista todas as filas, opcionalmente filtradas por prefixo.
-func (c *Client) ListQueues(ctx context.Context, prefix string) ([]types.Queue, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("list_queues", nil, time.Since(start)) }()
+func (c *Client) ListQueues(ctx context.Context, prefix string) (result []types.Queue, err error) {
+	defer observability.StartObserve("list_queues").Done(&err)
 
 	// Lista streams cujo nome começa com "queue-".
 	lister := c.js.StreamNames(ctx)
@@ -180,43 +177,41 @@ func (c *Client) ListQueues(ctx context.Context, prefix string) ([]types.Queue, 
 		}
 		out = append(out, q)
 	}
-	if err := lister.Err(); err != nil {
-		return out, fmt.Errorf("list streams: %w", err)
+	if lerr := lister.Err(); lerr != nil {
+		return out, fmt.Errorf("list streams: %w", lerr)
 	}
 	return out, nil
 }
 
 // DeleteQueue remove o stream. Idempotente — não retorna erro se não existe.
-func (c *Client) DeleteQueue(ctx context.Context, name string) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("delete_queue", nil, time.Since(start)) }()
+func (c *Client) DeleteQueue(ctx context.Context, name string) (err error) {
+	defer observability.StartObserve("delete_queue").Done(&err)
 
 	streamName := "queue-" + sanitizeStreamName(name)
-	err := c.js.DeleteStream(ctx, streamName)
+	derr := c.js.DeleteStream(ctx, streamName)
 	c.invalidateStream(streamName)
 	c.invalidateConsumer(queueConsumerName(name))
-	if err != nil && !errors.Is(err, jetstream.ErrStreamNotFound) {
-		return fmt.Errorf("delete stream: %w", err)
+	if derr != nil && !errors.Is(derr, jetstream.ErrStreamNotFound) {
+		return fmt.Errorf("delete stream: %w", derr)
 	}
 	observability.L().Info("fila removida", "name", name, "stream", streamName)
 	return nil
 }
 
 // PurgeQueue esvazia o stream sem removê-lo.
-func (c *Client) PurgeQueue(ctx context.Context, name string) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("purge_queue", nil, time.Since(start)) }()
+func (c *Client) PurgeQueue(ctx context.Context, name string) (err error) {
+	defer observability.StartObserve("purge_queue").Done(&err)
 
 	streamName := "queue-" + sanitizeStreamName(name)
-	s, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+	s, serr := c.js.Stream(ctx, streamName)
+	if serr != nil {
+		if errors.Is(serr, jetstream.ErrStreamNotFound) {
 			return storage.ErrQueueNotFound
 		}
-		return fmt.Errorf("get stream: %w", err)
+		return fmt.Errorf("get stream: %w", serr)
 	}
-	if err := s.Purge(ctx); err != nil {
-		return fmt.Errorf("purge: %w", err)
+	if perr := s.Purge(ctx); perr != nil {
+		return fmt.Errorf("purge: %w", perr)
 	}
 	return nil
 }

@@ -237,6 +237,9 @@ func DecInflight(service string) {
 }
 
 // ObserveStorage registra uma operação de storage.
+//
+// Chamada manual — use StartObserve quando o método já tem named return:
+// é IMpossível chamá-la 2x por acidente (a defer consume o pointer).
 func ObserveStorage(op string, err error, duration time.Duration) {
 	if mg == nil {
 		return
@@ -248,6 +251,54 @@ func ObserveStorage(op string, err error, duration time.Duration) {
 	mg.storageOpsTotal.WithLabelValues(op, status).Inc()
 	mg.storageOpDuration.WithLabelValues(op).Observe(duration.Seconds())
 }
+
+// observeRecorder é uma instrumentação defer-friendly para métodos de
+// storage. Resolve um bug pré-existente em que 2 chamadas a ObserveStorage
+// (uma em defer, uma explícita no caminho de sucesso) inflavam os
+// contadores em 2x e mascaravam a taxa de erro.
+//
+// USO:
+//
+//	func (c *Client) Foo(ctx context.Context, ...) (err error) {
+//	    defer StartObserve("foo").Done(&err)
+//	    ...
+//	    return nil
+//	}
+//
+// O helper lê o *error* no momento do retorno — sucesso vira "ok", erro
+// vira "error", SEM possibilidade de double-count.
+type observeRecorder struct {
+	op    string
+	start time.Time
+}
+
+// StartObserve inicia a instrumentação. Use o retorno em um defer:
+//
+//	defer StartObserve("op_name").Done(&err)
+//
+// O método DEVE ser usado com named return; garante que err esteja
+// disponível quando o defer executar.
+func StartObserve(op string) observeRecorder {
+	return observeRecorder{op: op, start: time.Now()}
+}
+
+// Done deve ser chamado exatamente 1x no defer do método. Lê o ponteiro
+// para o erro retornado (named return) e registra métrica correspondente.
+//
+// O parâmetro *error* é por design — se err for nil ao final (sucesso),
+// status será "ok". Se err for não-nil (erro), status será "error".
+func (r observeRecorder) Done(err *error) {
+	var e error
+	if err != nil {
+		e = *err
+	}
+	ObserveStorage(r.op, e, time.Since(r.start))
+}
+
+// Start devolve o timestamp de início, para que outras métricas correlatas
+// (ex.: duração de long-poll) possam ser medidas com a mesma referência.
+// Útil quando o método tem múltiplas métricas no mesmo defer.
+func (r observeRecorder) Start() time.Time { return r.start }
 
 // ObserveAuth registra uma avaliação IAM/SigV4.
 func ObserveAuth(result string) {

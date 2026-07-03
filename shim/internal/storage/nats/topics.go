@@ -51,38 +51,30 @@ type subscriptionMetadataV1 struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// topicKV retorna o KV bucket de metadados dos tópicos (lazy init).
+// topicKV retorna o KV bucket de metadados dos tópicos (lazy init thread-safe).
 func (c *Client) topicKV(ctx context.Context) (jetstream.KeyValue, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.topicKVCache != nil {
-		return c.topicKVCache, nil
-	}
-	kv, err := c.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: topicMetadataBucket,
+	return c.topicKVCache.loadKV(ctx, func(ctx context.Context) (jetstream.KeyValue, error) {
+		kv, err := c.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: topicMetadataBucket,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create kv %s: %w", topicMetadataBucket, err)
+		}
+		return kv, nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("create kv %s: %w", topicMetadataBucket, err)
-	}
-	c.topicKVCache = kv
-	return kv, nil
 }
 
-// subscriptionKV retorna o KV bucket de inscrições (lazy init).
+// subscriptionKV retorna o KV bucket de inscrições (lazy init thread-safe).
 func (c *Client) subscriptionKV(ctx context.Context) (jetstream.KeyValue, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.subKVCache != nil {
-		return c.subKVCache, nil
-	}
-	kv, err := c.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: subscriptionMetadataBucket,
+	return c.subscriptionKVCache.loadKV(ctx, func(ctx context.Context) (jetstream.KeyValue, error) {
+		kv, err := c.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: subscriptionMetadataBucket,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create kv %s: %w", subscriptionMetadataBucket, err)
+		}
+		return kv, nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("create kv %s: %w", subscriptionMetadataBucket, err)
-	}
-	c.subKVCache = kv
-	return kv, nil
 }
 
 // saveTopicMetadata persiste metadados do tópico.
@@ -155,18 +147,17 @@ func (c *Client) topicStreamCfg(t types.Topic) jetstream.StreamConfig {
 // tópico existente em vez de erro (igual SNS).
 //
 // Persiste metadados em KV bucket `topic_meta` (CreatedAt, etc.).
-func (c *Client) CreateTopic(ctx context.Context, t types.Topic) (*types.Topic, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("create_topic", nil, time.Since(start)) }()
+func (c *Client) CreateTopic(ctx context.Context, t types.Topic) (result *types.Topic, err error) {
+	defer observability.StartObserve("create_topic").Done(&err)
 
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now().UTC()
 	}
 
 	cfg := c.topicStreamCfg(t)
-	s, err := c.js.CreateStream(ctx, cfg)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
+	s, cerr := c.js.CreateStream(ctx, cfg)
+	if cerr != nil {
+		if errors.Is(cerr, jetstream.ErrStreamNameAlreadyInUse) {
 			existing, gerr := c.js.Stream(ctx, cfg.Name)
 			if gerr != nil {
 				return nil, fmt.Errorf("topic existe mas falhou em buscar: %w", gerr)
@@ -178,8 +169,7 @@ func (c *Client) CreateTopic(ctx context.Context, t types.Topic) (*types.Topic, 
 			}
 			return &t, nil
 		}
-		observability.ObserveStorage("create_topic", err, time.Since(start))
-		return nil, fmt.Errorf("create stream: %w", err)
+		return nil, fmt.Errorf("create stream: %w", cerr)
 	}
 
 	c.cacheStream(cfg.Name, s)
@@ -197,17 +187,16 @@ func (c *Client) CreateTopic(ctx context.Context, t types.Topic) (*types.Topic, 
 // GetTopic busca um tópico existente.
 //
 // Carrega metadados do KV bucket; se stream não existe, devolve ErrTopicNotFound.
-func (c *Client) GetTopic(ctx context.Context, name string) (*types.Topic, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("get_topic", nil, time.Since(start)) }()
+func (c *Client) GetTopic(ctx context.Context, name string) (result *types.Topic, err error) {
+	defer observability.StartObserve("get_topic").Done(&err)
 
 	streamName := "topic-" + sanitizeStreamName(name)
-	s, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+	s, serr := c.js.Stream(ctx, streamName)
+	if serr != nil {
+		if errors.Is(serr, jetstream.ErrStreamNotFound) {
 			return nil, storage.ErrTopicNotFound
 		}
-		return nil, fmt.Errorf("get stream: %w", err)
+		return nil, fmt.Errorf("get stream: %w", serr)
 	}
 	c.cacheStream(streamName, s)
 
@@ -223,9 +212,8 @@ func (c *Client) GetTopic(ctx context.Context, name string) (*types.Topic, error
 }
 
 // ListTopics lista todos os tópicos, opcionalmente filtrados por prefixo.
-func (c *Client) ListTopics(ctx context.Context, prefix string) ([]types.Topic, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("list_topics", nil, time.Since(start)) }()
+func (c *Client) ListTopics(ctx context.Context, prefix string) (result []types.Topic, err error) {
+	defer observability.StartObserve("list_topics").Done(&err)
 
 	lister := c.js.StreamNames(ctx)
 	var out []types.Topic
@@ -245,8 +233,8 @@ func (c *Client) ListTopics(ctx context.Context, prefix string) ([]types.Topic, 
 		}
 		out = append(out, t)
 	}
-	if err := lister.Err(); err != nil {
-		return out, fmt.Errorf("list streams: %w", err)
+	if lerr := lister.Err(); lerr != nil {
+		return out, fmt.Errorf("list streams: %w", lerr)
 	}
 	return out, nil
 }
@@ -254,15 +242,14 @@ func (c *Client) ListTopics(ctx context.Context, prefix string) ([]types.Topic, 
 // DeleteTopic remove o stream + metadata KV.
 //
 // Também remove todas as inscrições do tópico (subscriptions órfãs não fazem sentido).
-func (c *Client) DeleteTopic(ctx context.Context, name string) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("delete_topic", nil, time.Since(start)) }()
+func (c *Client) DeleteTopic(ctx context.Context, name string) (err error) {
+	defer observability.StartObserve("delete_topic").Done(&err)
 
 	streamName := "topic-" + sanitizeStreamName(name)
-	err := c.js.DeleteStream(ctx, streamName)
+	derr := c.js.DeleteStream(ctx, streamName)
 	c.invalidateStream(streamName)
-	if err != nil && !errors.Is(err, jetstream.ErrStreamNotFound) {
-		return fmt.Errorf("delete stream: %w", err)
+	if derr != nil && !errors.Is(derr, jetstream.ErrStreamNotFound) {
+		return fmt.Errorf("delete stream: %w", derr)
 	}
 
 	// Remove metadata KV do tópico.
@@ -294,17 +281,16 @@ func (c *Client) DeleteTopic(ctx context.Context, name string) error {
 // `arn:aws:sns:<region>:<account>:<topic>:<random>`.
 //
 // Pending=true se for HTTP/HTTPS (precisa ConfirmSubscription); false se SQS.
-func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (*types.Subscription, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("subscribe", nil, time.Since(start)) }()
+func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (result *types.Subscription, err error) {
+	defer observability.StartObserve("subscribe").Done(&err)
 
 	if sub.CreatedAt.IsZero() {
 		sub.CreatedAt = time.Now().UTC()
 	}
 
 	// Verifica que tópico existe.
-	if _, err := c.GetTopic(ctx, extractTopicName(sub.TopicARN)); err != nil {
-		return nil, err
+	if _, gerr := c.GetTopic(ctx, extractTopicName(sub.TopicARN)); gerr != nil {
+		return nil, gerr
 	}
 
 	// Gera ARN se não veio preenchido.
@@ -319,9 +305,9 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (*types.
 		sub.Pending = false
 	}
 
-	kv, err := c.subscriptionKV(ctx)
-	if err != nil {
-		return nil, err
+	kv, kerr := c.subscriptionKV(ctx)
+	if kerr != nil {
+		return nil, kerr
 	}
 	md := subscriptionMetadataV1{
 		Version:      1,
@@ -335,12 +321,12 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (*types.
 		Pending:      sub.Pending,
 		CreatedAt:    sub.CreatedAt,
 	}
-	body, err := json.Marshal(md)
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+	body, merr := json.Marshal(md)
+	if merr != nil {
+		return nil, fmt.Errorf("marshal: %w", merr)
 	}
-	if _, err := kv.Put(ctx, subscriptionKey(sub.ARN), body); err != nil {
-		return nil, fmt.Errorf("put: %w", err)
+	if _, perr := kv.Put(ctx, subscriptionKey(sub.ARN), body); perr != nil {
+		return nil, fmt.Errorf("put: %w", perr)
 	}
 
 	observability.L().Info("inscrição criada",
@@ -353,13 +339,12 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (*types.
 }
 
 // ListSubscriptions lista inscrições, opcionalmente filtradas por tópico.
-func (c *Client) ListSubscriptions(ctx context.Context, topicName string) ([]types.Subscription, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("list_subscriptions", nil, time.Since(start)) }()
+func (c *Client) ListSubscriptions(ctx context.Context, topicName string) (result []types.Subscription, err error) {
+	defer observability.StartObserve("list_subscriptions").Done(&err)
 
-	all, err := c.listAllSubscriptions(ctx)
-	if err != nil {
-		return nil, err
+	all, lerr := c.listAllSubscriptions(ctx)
+	if lerr != nil {
+		return nil, lerr
 	}
 	if topicName == "" {
 		return all, nil
@@ -419,19 +404,18 @@ func (c *Client) listAllSubscriptions(ctx context.Context) ([]types.Subscription
 }
 
 // Unsubscribe remove uma inscrição pelo ARN.
-func (c *Client) Unsubscribe(ctx context.Context, subscriptionARN string) error {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("unsubscribe", nil, time.Since(start)) }()
+func (c *Client) Unsubscribe(ctx context.Context, subscriptionARN string) (err error) {
+	defer observability.StartObserve("unsubscribe").Done(&err)
 
-	kv, err := c.subscriptionKV(ctx)
-	if err != nil {
-		return err
+	kv, kerr := c.subscriptionKV(ctx)
+	if kerr != nil {
+		return kerr
 	}
-	if err := kv.Delete(ctx, subscriptionKey(subscriptionARN)); err != nil {
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
+	if derr := kv.Delete(ctx, subscriptionKey(subscriptionARN)); derr != nil {
+		if errors.Is(derr, jetstream.ErrKeyNotFound) {
 			return storage.ErrInvalidArgument("subscription não encontrada")
 		}
-		return fmt.Errorf("delete: %w", err)
+		return fmt.Errorf("delete: %w", derr)
 	}
 	observability.L().Info("inscrição removida", "arn", subscriptionARN)
 	return nil
@@ -457,18 +441,17 @@ func (c *Client) Unsubscribe(ctx context.Context, subscriptionARN string) error 
 // (ou falham). Trade-off: latência proporcional a #subscribers. Em prod, AWS
 // usa workers assíncronos com DLQ; para MVP, esta versão simplificada é
 // suficiente e mais previsível.
-func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Message) (*types.Message, error) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("publish", nil, time.Since(start)) }()
+func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Message) (result *types.Message, err error) {
+	defer observability.StartObserve("publish").Done(&err)
 
 	if msg == nil {
 		return nil, storage.ErrInvalidArgument("msg é nil")
 	}
 
 	// 1. Publish no stream do tópico.
-	topic, err := c.GetTopic(ctx, topicName)
-	if err != nil {
-		return nil, err
+	topic, terr := c.GetTopic(ctx, topicName)
+	if terr != nil {
+		return nil, terr
 	}
 
 	headers, herr := messageHeaders(msg.MessageAttributes)
@@ -481,9 +464,9 @@ func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Messa
 		Data:    []byte(msg.Body),
 		Header:  headers,
 	}
-	ackFuture, err := c.js.PublishMsgAsync(nmsg)
-	if err != nil {
-		return nil, fmt.Errorf("publish async: %w", err)
+	ackFuture, perr := c.js.PublishMsgAsync(nmsg)
+	if perr != nil {
+		return nil, fmt.Errorf("publish async: %w", perr)
 	}
 
 	select {
@@ -497,8 +480,8 @@ func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Messa
 	}
 
 	// 2. Lista subscriptions.
-	subs, err := c.ListSubscriptions(ctx, topicName)
-	if err != nil {
+	subs, lerr := c.ListSubscriptions(ctx, topicName)
+	if lerr != nil {
 		return msg, nil // msg publicada, fan-out falhou
 	}
 
