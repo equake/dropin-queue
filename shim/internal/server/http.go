@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -149,6 +150,10 @@ func (s *Server) handleAWSQuery(w http.ResponseWriter, r *http.Request) {
 		s.handlePurgeQueueQuery(w, r, params)
 	case protocol.ActionSetQueueAttributes:
 		s.handleSetQueueAttributesQuery(w, r, params)
+	case protocol.ActionSendMessageBatch:
+		s.handleSendMessageBatchQuery(w, r, params)
+	case protocol.ActionDeleteMessageBatch:
+		s.handleDeleteMessageBatchQuery(w, r, params)
 	default:
 		writeSQSFatalError(w, "UnsupportedOperation",
 			fmt.Sprintf("Action %q ainda não implementada", action), newRequestID())
@@ -186,6 +191,10 @@ func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 		s.handlePurgeQueueJSON(w, r, params)
 	case protocol.ActionSetQueueAttributes:
 		s.handleSetQueueAttributesJSON(w, r, params)
+	case protocol.ActionSendMessageBatch:
+		s.handleSendMessageBatchJSON(w, r, params)
+	case protocol.ActionDeleteMessageBatch:
+		s.handleDeleteMessageBatchJSON(w, r, params)
 	default:
 		writeSQSJSONFatalError(w, "UnsupportedOperation",
 			fmt.Sprintf("Action %q ainda não implementada", action))
@@ -810,6 +819,233 @@ func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{}`))
+}
+
+// --- SendMessageBatch ---
+
+// SendMessageBatchResultEntryQuery é uma entry bem-sucedida do SendMessageBatch (Query).
+//
+// XML tags em ordem lexicográfica para determinismo (não estritamente necessário,
+// mas ajuda no diff de testes).
+type sendMessageBatchResultEntryQuery struct {
+	XMLName         xml.Name `xml:"SendMessageBatchResultEntry"`
+	Id              string   `xml:"Id"`
+	MessageId       string   `xml:"MessageId"`
+	MD5OfMessageBody string  `xml:"MD5OfMessageBody"`
+	SequenceNumber  string   `xml:"SequenceNumber,omitempty"`
+}
+
+type batchFailureEntryQuery struct {
+	XMLName    xml.Name `xml:"BatchResultErrorEntry"`
+	Id         string   `xml:"Id"`
+	Code       string   `xml:"Code"`
+	Message    string   `xml:"Message"`
+	SenderFault bool    `xml:"SenderFault"`
+}
+
+type sendMessageBatchResultQuery struct {
+	XMLName   xml.Name                          `xml:"SendMessageBatchResult"`
+	Successful []sendMessageBatchResultEntryQuery `xml:"SendMessageBatchResultEntry"`
+	Failed     []batchFailureEntryQuery          `xml:"BatchResultErrorEntry"`
+}
+
+type sendMessageBatchResponseQuery struct {
+	XMLName  xml.Name                   `xml:"SendMessageBatchResponse"`
+	Xmlns    string                     `xml:"xmlns,attr"`
+	Result   sendMessageBatchResultQuery
+	Metadata protocol.ResponseMetadata
+}
+
+func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+
+	resp := sendMessageBatchResponseQuery{
+		Xmlns: "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Result: sendMessageBatchResultQuery{
+			Successful: make([]sendMessageBatchResultEntryQuery, 0, len(result.Successful)),
+			Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
+		},
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	for _, e := range result.Successful {
+		resp.Result.Successful = append(resp.Result.Successful, sendMessageBatchResultEntryQuery{
+			Id:               e.Id,
+			MessageId:        e.MessageID,
+			MD5OfMessageBody: e.MD5OfBody,
+			SequenceNumber:   e.SequenceNo,
+		})
+	}
+	for _, e := range result.Failed {
+		resp.Result.Failed = append(resp.Result.Failed, batchFailureEntryQuery{
+			Id:          e.Id,
+			Code:        e.Code,
+			Message:     e.Message,
+			SenderFault: e.SenderFault,
+		})
+	}
+
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+// sendMessageBatchResultEntryJSON é uma entry bem-sucedida em JSON.
+type sendMessageBatchResultEntryJSON struct {
+	Id               string `json:"Id"`
+	MessageId        string `json:"MessageId"`
+	MD5OfMessageBody string `json:"MD5OfMessageBody"`
+	SequenceNumber   string `json:"SequenceNumber,omitempty"`
+}
+
+// batchFailureEntryJSON é uma entry falha em JSON.
+type batchFailureEntryJSON struct {
+	Id          string `json:"Id"`
+	Code        string `json:"Code"`
+	Message     string `json:"Message"`
+	SenderFault bool   `json:"SenderFault"`
+}
+
+type sendMessageBatchResponseJSON struct {
+	Successful []sendMessageBatchResultEntryJSON `json:"Successful"`
+	Failed     []batchFailureEntryJSON          `json:"Failed"`
+}
+
+func (s *Server) handleSendMessageBatchJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+
+	resp := sendMessageBatchResponseJSON{
+		Successful: make([]sendMessageBatchResultEntryJSON, 0, len(result.Successful)),
+		Failed:     make([]batchFailureEntryJSON, 0, len(result.Failed)),
+	}
+	for _, e := range result.Successful {
+		resp.Successful = append(resp.Successful, sendMessageBatchResultEntryJSON{
+			Id:               e.Id,
+			MessageId:        e.MessageID,
+			MD5OfMessageBody: e.MD5OfBody,
+			SequenceNumber:   e.SequenceNo,
+		})
+	}
+	for _, e := range result.Failed {
+		resp.Failed = append(resp.Failed, batchFailureEntryJSON{
+			Id:          e.Id,
+			Code:        e.Code,
+			Message:     e.Message,
+			SenderFault: e.SenderFault,
+		})
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// --- DeleteMessageBatch ---
+
+type deleteMessageBatchResultEntryQuery struct {
+	XMLName xml.Name `xml:"DeleteMessageBatchResultEntry"`
+	Id      string   `xml:"Id"`
+}
+
+type deleteMessageBatchResultQuery struct {
+	XMLName    xml.Name                          `xml:"DeleteMessageBatchResult"`
+	Successful []deleteMessageBatchResultEntryQuery `xml:"DeleteMessageBatchResultEntry"`
+	Failed     []batchFailureEntryQuery          `xml:"BatchResultErrorEntry"`
+}
+
+type deleteMessageBatchResponseQuery struct {
+	XMLName  xml.Name                       `xml:"DeleteMessageBatchResponse"`
+	Xmlns    string                         `xml:"xmlns,attr"`
+	Result   deleteMessageBatchResultQuery
+	Metadata protocol.ResponseMetadata
+}
+
+func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
+	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromQuery(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSFatalError(w, awsErr.Code, awsErr.Message, newRequestID())
+		return
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+
+	resp := deleteMessageBatchResponseQuery{
+		Xmlns: "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Result: deleteMessageBatchResultQuery{
+			Successful: make([]deleteMessageBatchResultEntryQuery, 0, len(result.Successful)),
+			Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
+		},
+		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
+	}
+	for _, e := range result.Successful {
+		resp.Result.Successful = append(resp.Result.Successful, deleteMessageBatchResultEntryQuery{Id: e.Id})
+	}
+	for _, e := range result.Failed {
+		resp.Result.Failed = append(resp.Result.Failed, batchFailureEntryQuery{
+			Id:          e.Id,
+			Code:        e.Code,
+			Message:     e.Message,
+			SenderFault: e.SenderFault,
+		})
+	}
+
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+type deleteMessageBatchResultEntryJSON struct {
+	Id string `json:"Id"`
+}
+
+type deleteMessageBatchResponseJSON struct {
+	Successful []deleteMessageBatchResultEntryJSON `json:"Successful"`
+	Failed     []batchFailureEntryJSON            `json:"Failed"`
+}
+
+func (s *Server) handleDeleteMessageBatchJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
+	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromJSON(params))
+	if err != nil {
+		awsErr := sqs.AsAWSError(err)
+		writeSQSJSONFatalError(w, awsErr.Code, awsErr.Message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(http.StatusOK)
+
+	resp := deleteMessageBatchResponseJSON{
+		Successful: make([]deleteMessageBatchResultEntryJSON, 0, len(result.Successful)),
+		Failed:     make([]batchFailureEntryJSON, 0, len(result.Failed)),
+	}
+	for _, e := range result.Successful {
+		resp.Successful = append(resp.Successful, deleteMessageBatchResultEntryJSON{Id: e.Id})
+	}
+	for _, e := range result.Failed {
+		resp.Failed = append(resp.Failed, batchFailureEntryJSON{
+			Id:          e.Id,
+			Code:        e.Code,
+			Message:     e.Message,
+			SenderFault: e.SenderFault,
+		})
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // healthz é o liveness probe. Retorna 200 se o processo está vivo.
