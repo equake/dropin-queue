@@ -105,6 +105,14 @@ type Message struct {
 
 	// EnqueuedAt é o timestamp em que a mensagem foi enfileirada.
 	EnqueuedAt time.Time
+
+	// MessageGroupId (FIFO only): agrupa mensagens que devem ser processadas
+	// em ordem. Filas Standard ignoram.
+	MessageGroupId string
+
+	// MessageDeduplicationId (FIFO only): dedup nativo JetStream via
+	// Nats-Msg-Id header (TTL 2min default).
+	MessageDeduplicationId string
 }
 
 // MessageAttribute representa um MessageAttribute SQS.

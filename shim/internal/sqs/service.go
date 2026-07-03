@@ -52,6 +52,16 @@ const (
 
 	// ErrCodeInternalError: erro interno inesperado.
 	ErrCodeInternalError = "InternalError"
+
+	// ErrCodeMessageTooLarge: body da mensagem excede MaximumMessageSize.
+	ErrCodeMessageTooLarge = "MessageTooLarge"
+
+	// ErrCodeReceiptHandleIsInvalid: receipt handle malformado ou expirado.
+	ErrCodeReceiptHandleIsInvalid = "ReceiptHandleIsInvalid"
+
+	// ErrCodePurgeQueueInProgress: PurgeQueue já está rodando para essa fila
+	// (SQS devolve isso se PurgeQueue for chamado em <60s após o anterior).
+	ErrCodePurgeQueueInProgress = "PurgeQueueInProgress"
 )
 
 // Service implementa as operações SQS.
@@ -633,6 +643,18 @@ func AsAWSError(err error) *AWSError {
 	}
 	if errors.Is(err, storage.ErrQueueAlreadyExists) {
 		return &AWSError{Code: ErrCodeQueueAlreadyExists, Message: err.Error()}
+	}
+	var tooLarge *storage.ErrMessageTooLargeT
+	if errors.As(err, &tooLarge) {
+		return &AWSError{Code: ErrCodeMessageTooLarge, Message: err.Error()}
+	}
+	var invalidRH *storage.ErrInvalidReceiptHandleT
+	if errors.As(err, &invalidRH) {
+		return &AWSError{Code: ErrCodeReceiptHandleIsInvalid, Message: err.Error()}
+	}
+	var invalidArg *storage.ErrInvalidArgumentT
+	if errors.As(err, &invalidArg) {
+		return &AWSError{Code: ErrCodeInvalidParameterValue, Message: err.Error()}
 	}
 	return &AWSError{Code: ErrCodeInternalError, Message: err.Error()}
 }

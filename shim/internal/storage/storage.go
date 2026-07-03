@@ -16,6 +16,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/anomalyco/generic_queue/shim/pkg/types"
 )
@@ -40,6 +41,38 @@ var (
 	// ErrBrokerUnavailable: broker offline ou ctx cancelado.
 	ErrBrokerUnavailable = errors.New("broker unavailable")
 )
+
+// ErrInvalidArgument é um erro genérico para parâmetros inválidos passados
+// para o storage. A camada service o traduz para InvalidParameterValue.
+type ErrInvalidArgumentT string
+
+func (e ErrInvalidArgumentT) Error() string { return string(e) }
+
+// ErrMessageTooLarge indica que o body da mensagem excede o
+// MaximumMessageSize da fila. A camada service traduz para
+// MessageTooLarge (AWS).
+type ErrMessageTooLargeT struct {
+	BodyBytes int
+	MaxBytes  int
+}
+
+func (e ErrMessageTooLargeT) Error() string {
+	return fmt.Sprintf("message body (%d bytes) exceeds MaximumMessageSize (%d bytes)", e.BodyBytes, e.MaxBytes)
+}
+
+// ErrInvalidReceiptHandle indica que o receipt handle é inválido,
+// expirado ou já consumido. A camada service traduz para
+// ReceiptHandleIsInvalid.
+type ErrInvalidReceiptHandleT string
+
+func (e ErrInvalidReceiptHandleT) Error() string { return string(e) }
+
+// Shorthands para uso ergonômico no storage.
+func ErrInvalidArgument(msg string) error  { return ErrInvalidArgumentT(msg) }
+func ErrMessageTooLarge(body, max int) error {
+	return ErrMessageTooLargeT{BodyBytes: body, MaxBytes: max}
+}
+func ErrInvalidReceiptHandle(msg string) error { return ErrInvalidReceiptHandleT(msg) }
 
 // QueueStorage é a interface que abstrai operações de filas no broker.
 //
