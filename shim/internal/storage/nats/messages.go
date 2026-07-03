@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -148,7 +149,14 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 
 	publishOpts := []jetstream.PublishOpt{}
 	if msg.MessageDeduplicationId != "" {
+		// Explicit dedup ID do cliente — tem prioridade.
 		publishOpts = append(publishOpts, jetstream.WithMsgID(msg.MessageDeduplicationId))
+	} else if q.Attributes.ContentBasedDeduplication && q.FIFO {
+		// ContentBasedDeduplication em fila FIFO: AWS usa SHA-256 do body
+		// como dedup ID (em janela de 5min). Sem isso, mensagens idênticas
+		// dentro da janela não seriam deduplicadas.
+		sum := sha256.Sum256([]byte(msg.Body))
+		publishOpts = append(publishOpts, jetstream.WithMsgID(hex.EncodeToString(sum[:])))
 	}
 
 	// PublishMsgAsync aceita *nats.Msg — permite setar headers nativamente.

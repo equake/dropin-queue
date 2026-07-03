@@ -330,3 +330,128 @@ def test_send_message_batch_nonexistent_queue(sqs_client, unique_queue_name):
     with pytest.raises(ClientError) as exc:
         sqs_client.send_message_batch(QueueUrl=url, Entries=entries)
     assert "QueueDoesNotExist" in _code(exc.value)
+
+
+# --- FIFO ordering + ContentBasedDeduplication ---
+
+def test_fifo_ordering_within_message_group(sqs_client, unique_queue_name):
+    """Mensagens dentro do mesmo MessageGroupId chegam na ordem de envio.
+
+    Sends 10 mensagens com 2 grupos (a-0..a-4, b-0..b-4) intercaladas.
+    Receive deve devolver todos os 'a' em ordem 0→4 e todos os 'b' em ordem 0→4.
+    """
+    qname = unique_queue_name + ".fifo"
+    sqs_client.create_queue(
+        QueueName=qname,
+        Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+    )
+    url = sqs_client.get_queue_url(QueueName=qname)["QueueUrl"]
+
+    for i in range(5):
+        sqs_client.send_message(
+            QueueUrl=url, MessageBody=f"a-{i}",
+            MessageGroupId="group-a",
+            MessageDeduplicationId=f"da-{qname}-{i}",
+        )
+        sqs_client.send_message(
+            QueueUrl=url, MessageBody=f"b-{i}",
+            MessageGroupId="group-b",
+            MessageDeduplicationId=f"db-{qname}-{i}",
+        )
+
+    got = sqs_client.receive_message(
+        QueueUrl=url, MaxNumberOfMessages=20, WaitTimeSeconds=0,
+    )["Messages"]
+    bodies = [m["Body"] for m in got]
+    assert len(bodies) == 10
+
+    group_a = [b for b in bodies if b.startswith("a-")]
+    group_b = [b for b in bodies if b.startswith("b-")]
+    assert group_a == ["a-0", "a-1", "a-2", "a-3", "a-4"], (
+        f"Group A fora de ordem: {group_a}"
+    )
+    assert group_b == ["b-0", "b-1", "b-2", "b-3", "b-4"], (
+        f"Group B fora de ordem: {group_b}"
+    )
+
+
+def test_content_based_deduplication(sqs_client, unique_queue_name):
+    """ContentBasedDeduplication dedup bodies idênticos dentro da janela de 5min.
+
+    Sends 3 mensagens com mesmo body e mesmo groupId → apenas 1 entrega.
+    """
+    qname = unique_queue_name + ".fifo"
+    sqs_client.create_queue(
+        QueueName=qname,
+        Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+    )
+    url = sqs_client.get_queue_url(QueueName=qname)["QueueUrl"]
+
+    # 3 mensagens com body idêntico → dedup para 1.
+    results = []
+    for _ in range(3):
+        r = sqs_client.send_message(
+            QueueUrl=url, MessageBody="identical-body", MessageGroupId="g1",
+        )
+        results.append(r)
+    # Todos retornam o mesmo MessageId (a primeira).
+    message_ids = {r["MessageId"] for r in results}
+    assert len(message_ids) == 1, f"Esperado 1 ID único, got {message_ids}"
+
+    got = sqs_client.receive_message(
+        QueueUrl=url, MaxNumberOfMessages=10, WaitTimeSeconds=0,
+    )["Messages"]
+    assert len(got) == 1
+    assert got[0]["Body"] == "identical-body"
+
+
+def test_content_based_deduplication_different_bodies_not_deduped(
+    sqs_client, unique_queue_name,
+):
+    """ContentBasedDeduplication NÃO dedup bodies diferentes."""
+    qname = unique_queue_name + ".fifo"
+    sqs_client.create_queue(
+        QueueName=qname,
+        Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+    )
+    url = sqs_client.get_queue_url(QueueName=qname)["QueueUrl"]
+
+    for i in range(3):
+        sqs_client.send_message(
+            QueueUrl=url, MessageBody=f"unique-body-{i}", MessageGroupId="g1",
+        )
+
+    got = sqs_client.receive_message(
+        QueueUrl=url, MaxNumberOfMessages=10, WaitTimeSeconds=0,
+    )["Messages"]
+    assert len(got) == 3
+    bodies = sorted(m["Body"] for m in got)
+    assert bodies == ["unique-body-0", "unique-body-1", "unique-body-2"]
+
+
+def test_message_deduplication_id_takes_priority_over_content(
+    sqs_client, unique_queue_name,
+):
+    """MessageDeduplicationId explícito tem prioridade sobre content-based dedup.
+
+    Sends 3 mensagens com mesmo body mas DEDUP IDs diferentes → 3 entregues.
+    """
+    qname = unique_queue_name + ".fifo"
+    sqs_client.create_queue(
+        QueueName=qname,
+        Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+    )
+    url = sqs_client.get_queue_url(QueueName=qname)["QueueUrl"]
+
+    for i in range(3):
+        sqs_client.send_message(
+            QueueUrl=url,
+            MessageBody="same-body",
+            MessageGroupId="g1",
+            MessageDeduplicationId=f"explicit-dedup-{qname}-{i}",
+        )
+
+    got = sqs_client.receive_message(
+        QueueUrl=url, MaxNumberOfMessages=10, WaitTimeSeconds=0,
+    )["Messages"]
+    assert len(got) == 3, "DEDUP IDs explícitos devem sobrescrever content-based"
