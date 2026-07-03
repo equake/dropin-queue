@@ -34,6 +34,7 @@ A camada de API é um **shim em Go** (`shimd`) que implementa:
 **Fase 1 (SQS Standard — leitura/metadados) ✅ completa.**
 **Fase 2 (SQS Standard — operações de mensagem) ✅ completa.**
 **Fase 3 (Batch + FIFO completo) ✅ completa.**
+**Fase 4 (SNS — tópicos + subscriptions + fan-out + filter policy) ✅ completa.**
 
 ### Operações SQS implementadas (13/13 do Standard)
 
@@ -53,8 +54,32 @@ A camada de API é um **shim em Go** (`shimd`) que implementa:
 | `SendMessageBatch`       | ✅             | ✅             | ✅         |
 | `DeleteMessageBatch`     | ✅             | ✅             | ✅         |
 
-**Cobertura de testes:** 45/45 passando (12 smoke + 15 messages + 18 batch)
-em ~18s contra shim rodando em docker-compose com NATS JetStream 2.10 + MinIO.
+### Operações SNS implementadas (9/9 do MVP)
+
+| Operação                   | Protocolo Query | Protocolo JSON | Testes E2E |
+|----------------------------|:--------------:|:--------------:|:----------:|
+| `CreateTopic`              | ✅             | ✅             | ✅         |
+| `GetTopicAttributes`       | ✅             | ✅             | ✅         |
+| `ListTopics`               | ✅             | ✅             | ✅         |
+| `DeleteTopic`              | ✅             | ✅             | ✅         |
+| `Subscribe` (sqs)          | ✅             | ✅             | ✅         |
+| `Unsubscribe`              | ✅             | ✅             | ✅         |
+| `Publish`                  | ✅             | ✅             | ✅         |
+| `ListSubscriptions`        | ✅             | ✅             | ✅         |
+| `ListSubscriptionsByTopic` | ✅             | ✅             | ✅         |
+
+**Funcionalidades SNS:**
+- **Fan-out síncrono** de mensagens para todas as subscriptions SQS inscritas
+- **Filter policy** (`{"type":["alert"]}`) aplicado antes da entrega
+- **Idempotência** de CreateTopic (mesmo nome → mesmo ARN) e DeleteTopic
+  (não falha em ARN inexistente)
+- **Cascade**: DeleteTopic remove subscriptions órfãs automaticamente
+- **ConfirmSubscription** stub (UnsupportedOperation no MVP; subscriptions
+  HTTP/HTTPS ficam pending)
+
+**Cobertura de testes:** 65/65 passando (12 SQS smoke + 15 SQS messages +
+18 SQS batch + 20 SNS) em ~60s contra shim rodando em docker-compose com
+NATS JetStream 2.10 + MinIO.
 
 ### Funcionalidades SQS implementadas
 
@@ -76,12 +101,10 @@ em ~18s contra shim rodando em docker-compose com NATS JetStream 2.10 + MinIO.
   - Validação de Ids únicos (BatchEntryIdsNotDistinct)
   - Validação de limite (TooManyEntriesInBatch)
   - Validação de soma de bodies ≤ 256 KiB
-- **31 commits granulares em português**, cada um com mensagem detalhada
+- **38 commits granulares em português**, cada um com mensagem detalhada
 
 ### O que vem a seguir
 
-- **Fase 4 — SNS:** `CreateTopic`, `Subscribe` (sqs/http/https), `Publish`,
-  `ListSubscriptions`, `Unsubscribe`, `DeleteTopic`, fan-out com filter policy
 - **Fase 5 — Auth real:** Verificação SigV4 + IAM store (policy JSON evaluation) + CLI `shimctl`
 - **Fase 6 — Provisioning:** Terraform módulos production-ready (network,
   compute, broker, api, observability, objectstore)

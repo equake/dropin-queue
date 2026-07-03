@@ -4,7 +4,7 @@ Este documento descreve a arquitetura do `generic_queue`, um clone
 auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go
 sobre NATS JetStream.
 
-> Status: Fase 3 completa — 13 operações SQS Standard funcionais
+> Status: Fase 4 completa — 13 SQS + 9 SNS operações funcionais (65/65 testes E2E passando)
 > (CreateQueue/Get/List/Delete + SendMessage/ReceiveMessage/DeleteMessage/
 > ChangeMessageVisibility/PurgeQueue + SetQueueAttributes + SendMessageBatch/
 > DeleteMessageBatch), todas com dual protocol (Query+JSON), todas com
@@ -312,15 +312,20 @@ Mapeamentos críticos:
 - [x] FIFO ContentBasedDeduplication via SHA-256(body) como Nats-Msg-Id
 - [x] FIFO SequenceNumber retornado em cada send
 
-### Fase 4 — SNS (próximo)
+### Fase 4 — SNS ✅ completa
 
-- [ ] CreateTopic
-- [ ] Subscribe (sqs/http/https)
-- [ ] Publish
-- [ ] ListSubscriptions
-- [ ] Unsubscribe / DeleteTopic
-- [ ] Fan-out com filter policy
-- [ ] Job server assíncrono para HTTP/HTTPS subscriptions
+- [x] CreateTopic (idempotente — mesmo nome → mesmo ARN)
+- [x] GetTopicAttributes / ListTopics
+- [x] Subscribe SQS (subscriptions HTTP/HTTPS ficam pending — ConfirmSubscription stub)
+- [x] Unsubscribe (idempotente — não falha em ARN inexistente)
+- [x] DeleteTopic (idempotente + cascade remove subscriptions órfãs)
+- [x] Publish com fan-out síncrono para subscriptions SQS
+- [x] Filter policy (`{"type":["alert"]}`) aplicado antes da entrega
+- [x] ListSubscriptions (global) e ListSubscriptionsByTopic
+- [x] Validações: Message vazio, Message > 256 KiB, TopicArn inválido
+- [x] Suporte a MessageAttributes (String/Number/Binary) + Subject
+- [x] Dual protocol: Query (form+XML) e JSON 1.0 simultaneamente
+- [x] 20 testes E2E com boto3 — 65/65 totais passando
 
 ### Fase 5 — Auth + IAM real
 
