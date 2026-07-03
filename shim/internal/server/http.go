@@ -1327,9 +1327,9 @@ func (s *Server) handleSNSListTopicsQuery(w http.ResponseWriter, r *http.Request
 		TopicArn string   `xml:"TopicArn"`
 	}
 	type result struct {
-		XMLName   xml.Name     `xml:"ListTopicsResult"`
+		XMLName   xml.Name      `xml:"ListTopicsResult"`
 		Members   []topicMember `xml:"Topics>member"`
-		NextToken string       `xml:"NextToken,omitempty"`
+		NextToken string        `xml:"NextToken,omitempty"`
 	}
 	type response struct {
 		XMLName  xml.Name `xml:"ListTopicsResponse"`
@@ -1564,8 +1564,8 @@ func (s *Server) writeSubscriptionsXML(w http.ResponseWriter, subs []types.Subsc
 		XMLName: xml.Name{Local: responseTag},
 		Xmlns:   "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
 		Result: result{
-			XMLName: xml.Name{Local: resultTag},
-			Members: members,
+			XMLName:   xml.Name{Local: resultTag},
+			Members:   members,
 			NextToken: nextToken,
 		},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},

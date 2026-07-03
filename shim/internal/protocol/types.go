@@ -41,16 +41,16 @@ const (
 
 // Operações SNS (subset).
 const (
-	ActionCreateTopic                  Action = "CreateTopic"
-	ActionGetTopicAttributes           Action = "GetTopicAttributes"
-	ActionListTopics                   Action = "ListTopics"
-	ActionSubscribe                    Action = "Subscribe"
-	ActionUnsubscribe                  Action = "Unsubscribe"
-	ActionPublish                      Action = "Publish"
-	ActionListSubscriptions            Action = "ListSubscriptions"
-	ActionListSubscriptionsByTopic     Action = "ListSubscriptionsByTopic"
-	ActionDeleteTopic                  Action = "DeleteTopic"
-	ActionConfirmSubscription          Action = "ConfirmSubscription"
+	ActionCreateTopic              Action = "CreateTopic"
+	ActionGetTopicAttributes       Action = "GetTopicAttributes"
+	ActionListTopics               Action = "ListTopics"
+	ActionSubscribe                Action = "Subscribe"
+	ActionUnsubscribe              Action = "Unsubscribe"
+	ActionPublish                  Action = "Publish"
+	ActionListSubscriptions        Action = "ListSubscriptions"
+	ActionListSubscriptionsByTopic Action = "ListSubscriptionsByTopic"
+	ActionDeleteTopic              Action = "DeleteTopic"
+	ActionConfirmSubscription      Action = "ConfirmSubscription"
 )
 
 // ServiceName identifica o serviço AWS (sqs, sns).

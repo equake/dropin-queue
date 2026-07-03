@@ -139,7 +139,7 @@ func (c *Client) topicStreamCfg(t types.Topic) jetstream.StreamConfig {
 		Retention: jetstream.LimitsPolicy,
 		MaxMsgs:   10_000_000,
 		MaxAge:    4 * 24 * time.Hour, // SNS não tem retention próprio; 4 dias para evitar OOM
-		Replicas:  1,                 // dev mode; prod usa 3
+		Replicas:  1,                  // dev mode; prod usa 3
 	}
 }
 

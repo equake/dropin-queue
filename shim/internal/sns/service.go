@@ -197,16 +197,16 @@ func (s *Service) GetTopicAttributes(ctx context.Context, params *GetTopicAttrib
 	}
 
 	attrs := map[string]string{
-		"TopicArn":   params.TopicARN,
-		"Owner":      s.accountID,
-		"Policy":     `{"Version":"2012-10-17","Id":"__default_policy_ID","Statement":[{"Sid":"__default_statement_ID","Effect":"Allow","Principal":{"AWS":"*"},"Action":["SNS:Publish","SNS:RemovePermission","SNS:DeleteTopic","SNS:GetTopicAttributes","SNS:AddPermission","SNS:ListSubscriptions","SNS:ListSubscriptionsByTopic","SNS:Subscribe"],"Resource":"arn:aws:sns:*:*:` + t.Name + `","Condition":{"StringEquals":{"AWS:SourceOwner":"` + s.accountID + `"}}}]}`,
-		"DisplayName":         "",
-		"DeliveryPolicy":      "",
-		"SubscriptionsConfirmed": "0",
-		"SubscriptionsDeleted":   "0",
-		"SubscriptionsPending":   "0",
+		"TopicArn":                params.TopicARN,
+		"Owner":                   s.accountID,
+		"Policy":                  `{"Version":"2012-10-17","Id":"__default_policy_ID","Statement":[{"Sid":"__default_statement_ID","Effect":"Allow","Principal":{"AWS":"*"},"Action":["SNS:Publish","SNS:RemovePermission","SNS:DeleteTopic","SNS:GetTopicAttributes","SNS:AddPermission","SNS:ListSubscriptions","SNS:ListSubscriptionsByTopic","SNS:Subscribe"],"Resource":"arn:aws:sns:*:*:` + t.Name + `","Condition":{"StringEquals":{"AWS:SourceOwner":"` + s.accountID + `"}}}]}`,
+		"DisplayName":             "",
+		"DeliveryPolicy":          "",
+		"SubscriptionsConfirmed":  "0",
+		"SubscriptionsDeleted":    "0",
+		"SubscriptionsPending":    "0",
 		"EffectiveDeliveryPolicy": `{"http":{"defaultHealthyRetryPolicy":{"minDelayTarget":20,"maxDelayTarget":20,"numRetries":3,"numMaxDelayRetries":0,"numNoDelayRetries":0,"numMinDelayRetries":0,"backoffFunction":"linear"}}, "https":{"defaultHealthyRetryPolicy":{"minDelayTarget":20,"maxDelayTarget":20,"numRetries":3,"numMaxDelayRetries":0,"numNoDelayRetries":0,"numMinDelayRetries":0,"backoffFunction":"linear"}}}`,
-		"CreatedTimestamp": fmt.Sprintf("%d", t.CreatedAt.UnixMilli()),
+		"CreatedTimestamp":        fmt.Sprintf("%d", t.CreatedAt.UnixMilli()),
 	}
 	return &GetTopicAttributesResult{Attributes: attrs}, nil
 }
@@ -309,12 +309,12 @@ func DeleteTopicParamsFromJSON(params map[string]any) *DeleteTopicParams {
 
 // SubscribeParams contém os parâmetros de Subscribe.
 type SubscribeParams struct {
-	TopicARN         string
-	Protocol         string // "sqs", "http", "https", "email", "email-json", "sms", "application"
-	Endpoint         string
-	FilterPolicy     string // JSON string, opcional
-	RawDelivery      bool   // opcional (default false)
-	ReturnSubscriptionARN bool // opcional (default true)
+	TopicARN              string
+	Protocol              string // "sqs", "http", "https", "email", "email-json", "sms", "application"
+	Endpoint              string
+	FilterPolicy          string // JSON string, opcional
+	RawDelivery           bool   // opcional (default false)
+	ReturnSubscriptionARN bool   // opcional (default true)
 }
 
 // SubscribeResult contém o ARN da inscrição criada.
@@ -406,9 +406,9 @@ func (s *Service) Subscribe(ctx context.Context, params *SubscribeParams) (*Subs
 // top-level para clientes que enviam desta forma.
 func SubscribeParamsFromQuery(params url.Values) *SubscribeParams {
 	p := &SubscribeParams{
-		TopicARN:             params.Get("TopicArn"),
-		Protocol:             params.Get("Protocol"),
-		Endpoint:             params.Get("Endpoint"),
+		TopicARN:              params.Get("TopicArn"),
+		Protocol:              params.Get("Protocol"),
+		Endpoint:              params.Get("Endpoint"),
 		ReturnSubscriptionARN: params.Get("ReturnSubscriptionArn") == "true",
 	}
 	// FilterPolicy pode vir:
@@ -601,10 +601,10 @@ func ListSubscriptionsByTopicParamsFromJSON(params map[string]any) *ListSubscrip
 
 // PublishParams contém os parâmetros de Publish.
 type PublishParams struct {
-	TopicARN         string
-	Message          string
-	Subject          string                 // opcional
-	MessageStructure string                 // opcional: "json" para estrutura especial
+	TopicARN          string
+	Message           string
+	Subject           string // opcional
+	MessageStructure  string // opcional: "json" para estrutura especial
 	MessageAttributes map[string]protocol.MessageAttributeValue
 }
 
@@ -668,9 +668,9 @@ func (s *Service) Publish(ctx context.Context, params *PublishParams) (*PublishR
 // PublishParamsFromQuery normaliza Query → PublishParams.
 func PublishParamsFromQuery(params url.Values) *PublishParams {
 	p := &PublishParams{
-		TopicARN: params.Get("TopicArn"),
-		Message:  params.Get("Message"),
-		Subject:  params.Get("Subject"),
+		TopicARN:          params.Get("TopicArn"),
+		Message:           params.Get("Message"),
+		Subject:           params.Get("Subject"),
 		MessageAttributes: protocol.ExtractQueryMessageAttributes(params),
 	}
 	return p
