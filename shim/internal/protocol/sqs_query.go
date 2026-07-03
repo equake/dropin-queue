@@ -186,16 +186,27 @@ func SortValues(v url.Values) []string {
 	return out
 }
 
+// msgAttrEntry é uma entrada MessageAttribute parseada intermediária.
+type msgAttrEntry struct {
+	Name, DataType, StringValue, BinaryValue string
+	StringList                               []string
+}
+
 // ExtractQueryMessageAttributes extrai pares MessageAttribute do form-encoded.
 //
-// AWS SQS Query usa formato numerado:
+// Suporta dois formatos:
+//
+// (1) Padrão AWS:
 //
 //	MessageAttribute.1.Name=foo
 //	MessageAttribute.1.DataType=String
 //	MessageAttribute.1.StringValue=bar
-//	MessageAttribute.2.Name=count
-//	MessageAttribute.2.DataType=Number
-//	MessageAttribute.2.StringValue=42
+//
+// (2) boto3 entry wrapper (usado em SNS):
+//
+//	MessageAttributes.entry.1.Name=type
+//	MessageAttributes.entry.1.Value.DataType=String
+//	MessageAttributes.entry.1.Value.StringValue=alert
 //
 // DataType = String|Number|Binary|String.List
 //
@@ -205,41 +216,34 @@ func SortValues(v url.Values) []string {
 // Para Binary vem em MessageAttribute.N.BinaryValue (base64).
 func ExtractQueryMessageAttributes(params url.Values) map[string]MessageAttributeValue {
 	out := make(map[string]MessageAttributeValue)
-	// Coleta por índice: 1 → {Name, DataType, StringValue, BinaryValue}
-	type entry struct {
-		Name, DataType, StringValue, BinaryValue string
-		StringList                               []string
-	}
-	byIdx := make(map[string]*entry)
+	byIdx := make(map[string]*msgAttrEntry)
 
-	prefix := "MessageAttribute."
-	for k, vs := range params {
-		if !strings.HasPrefix(k, prefix) || len(vs) == 0 {
-			continue
+	parseQueryAttrs(params, "MessageAttribute.", byIdx)
+
+	// Formato entry wrapper (boto3 SNS): DataType/StringValue ficam sob "Value.".
+	// Achatamos renomeando esses campos para nomes diretos.
+	entryByIdx := make(map[string]*msgAttrEntry)
+	parseQueryAttrs(params, "MessageAttributes.entry.", entryByIdx)
+	for idx, e := range entryByIdx {
+		flat := byIdx[idx]
+		if flat == nil {
+			flat = &msgAttrEntry{}
+			byIdx[idx] = flat
 		}
-		rest := k[len(prefix):] // "1.Name" ou "1.StringListValue.3"
-		dot := strings.IndexByte(rest, '.')
-		if dot < 0 {
-			continue
+		if flat.Name == "" {
+			flat.Name = e.Name
 		}
-		idx := rest[:dot]
-		field := rest[dot+1:]
-		if _, ok := byIdx[idx]; !ok {
-			byIdx[idx] = &entry{}
+		if flat.DataType == "" {
+			flat.DataType = e.DataType
 		}
-		e := byIdx[idx]
-		v := vs[0]
-		switch {
-		case field == "Name":
-			e.Name = v
-		case field == "DataType":
-			e.DataType = v
-		case field == "StringValue":
-			e.StringValue = v
-		case field == "BinaryValue":
-			e.BinaryValue = v
-		case strings.HasPrefix(field, "StringListValue."):
-			e.StringList = append(e.StringList, v)
+		if flat.StringValue == "" {
+			flat.StringValue = e.StringValue
+		}
+		if flat.BinaryValue == "" {
+			flat.BinaryValue = e.BinaryValue
+		}
+		if len(flat.StringList) == 0 {
+			flat.StringList = e.StringList
 		}
 	}
 
@@ -266,6 +270,47 @@ func ExtractQueryMessageAttributes(params url.Values) map[string]MessageAttribut
 		}
 	}
 	return out
+}
+
+// parseQueryAttrs popula byIdx a partir de params com key começando com prefix.
+//
+// Cada key após o prefix é "<idx>.<campo>" — mas o campo pode ter pontos
+// aninhados como "Value.DataType" (formato boto3 entry wrapper). Para esse
+// formato achatamos: se o campo começa com "Value.", extraímos só o sufixo.
+func parseQueryAttrs(params url.Values, prefix string, byIdx map[string]*msgAttrEntry) {
+	for k, vs := range params {
+		if !strings.HasPrefix(k, prefix) || len(vs) == 0 {
+			continue
+		}
+		rest := k[len(prefix):]
+		dot := strings.IndexByte(rest, '.')
+		if dot < 0 {
+			continue
+		}
+		idx := rest[:dot]
+		field := rest[dot+1:]
+		// Achata "Value.DataType" → "DataType", etc.
+		if strings.HasPrefix(field, "Value.") {
+			field = field[len("Value."):]
+		}
+		if _, ok := byIdx[idx]; !ok {
+			byIdx[idx] = &msgAttrEntry{}
+		}
+		e := byIdx[idx]
+		v := vs[0]
+		switch {
+		case field == "Name":
+			e.Name = v
+		case field == "DataType":
+			e.DataType = v
+		case field == "StringValue":
+			e.StringValue = v
+		case field == "BinaryValue":
+			e.BinaryValue = v
+		case strings.HasPrefix(field, "StringListValue."):
+			e.StringList = append(e.StringList, v)
+		}
+	}
 }
 
 // MessageAttributeValue é o formato interno para MessageAttribute parsed.
