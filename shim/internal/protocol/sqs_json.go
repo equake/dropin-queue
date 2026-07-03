@@ -176,3 +176,103 @@ func ExtractJSONAttributes(params map[string]any, key, idField string) map[strin
 	}
 	return out
 }
+
+// JSONMessageAttribute representa um MessageAttribute SQS no JSON 1.0.
+//
+// Formato (documentado AWS):
+//
+//	{"Name": "foo", "DataType": "String", "StringValue": "bar"}
+//	{"Name": "count", "DataType": "Number", "StringValue": "42"}
+//	{"Name": "blob", "DataType": "Binary", "BinaryValue": "base64..."}
+//	{"Name": "tags", "DataType": "String.List", "StringListValues": ["a","b"]}
+type JSONMessageAttribute struct {
+	Name             string   `json:"Name"`
+	DataType         string   `json:"DataType"`
+	StringValue      string   `json:"StringValue,omitempty"`
+	BinaryValue      string   `json:"BinaryValue,omitempty"` // base64
+	StringListValues []string `json:"StringListValues,omitempty"`
+}
+
+// ExtractJSONMessageAttributes extrai MessageAttributes do JSON params.
+//
+// Suporta 2 formatos:
+//
+// Documentado:
+//
+//	"MessageAttribute": [
+//	  {"Name":"foo","DataType":"String","StringValue":"bar"},
+//	  ...
+//	]
+//
+// Compacto (boto3 ≥ 1.40):
+//
+//	"MessageAttributes": {
+//	  "foo": {"DataType":"String","StringValue":"bar"},
+//	  ...
+//	}
+//
+// Retorna map[string]MessageAttributeValue pronto para conversão em
+// types.MessageAttribute.
+func ExtractJSONMessageAttributes(params map[string]any) map[string]MessageAttributeValue {
+	out := make(map[string]MessageAttributeValue)
+
+	// Tenta formato compacto primeiro (boto3 ≥ 1.40 envia este).
+	if raw, ok := params["MessageAttributes"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			for name, v := range m {
+				if obj, ok := v.(map[string]any); ok {
+					parseJSONMsgAttr(out, name, obj)
+				}
+			}
+			return out
+		}
+	}
+
+	// Formato documentado (array).
+	if raw, ok := params["MessageAttribute"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, item := range arr {
+				if obj, ok := item.(map[string]any); ok {
+					name, _ := obj["Name"].(string)
+					if name == "" {
+						continue
+					}
+					parseJSONMsgAttr(out, name, obj)
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+// parseJSONMsgAttr processa um objeto JSON individual e adiciona ao map out.
+func parseJSONMsgAttr(out map[string]MessageAttributeValue, name string, obj map[string]any) {
+	dt, _ := obj["DataType"].(string)
+	if dt == "" {
+		return
+	}
+	switch dt {
+	case "String", "Number":
+		sv, _ := obj["StringValue"].(string)
+		out[name] = MessageAttributeValue{DataType: dt, StringValue: sv}
+	case "Binary":
+		bv, _ := obj["BinaryValue"].(string)
+		out[name] = MessageAttributeValue{
+			DataType:    "Binary",
+			BinaryValue: decodeBase64(bv),
+		}
+	case "String.List":
+		arr, _ := obj["StringListValues"].([]any)
+		items := make([]string, 0, len(arr))
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				items = append(items, s)
+			}
+		}
+		out[name] = MessageAttributeValue{
+			DataType:    "String.List",
+			StringValue: joinList(items),
+		}
+	}
+}

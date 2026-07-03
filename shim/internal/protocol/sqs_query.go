@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -180,6 +181,144 @@ func SortValues(v url.Values) []string {
 		vs := v[k]
 		sort.Strings(vs)
 		out = append(out, fmt.Sprintf("%s=%s", k, strings.Join(vs, ",")))
+	}
+	return out
+}
+
+// ExtractQueryMessageAttributes extrai pares MessageAttribute do form-encoded.
+//
+// AWS SQS Query usa formato numerado:
+//
+//	MessageAttribute.1.Name=foo
+//	MessageAttribute.1.DataType=String
+//	MessageAttribute.1.StringValue=bar
+//	MessageAttribute.2.Name=count
+//	MessageAttribute.2.DataType=Number
+//	MessageAttribute.2.StringValue=42
+//
+// DataType = String|Number|Binary|String.List
+//
+// Para String.List o valor vem em MessageAttribute.N.StringListValue.1, .2, ...
+// (suportado: parseamos como JSON array).
+//
+// Para Binary vem em MessageAttribute.N.BinaryValue (base64).
+func ExtractQueryMessageAttributes(params url.Values) map[string]MessageAttributeValue {
+	out := make(map[string]MessageAttributeValue)
+	// Coleta por índice: 1 → {Name, DataType, StringValue, BinaryValue}
+	type entry struct {
+		Name, DataType, StringValue, BinaryValue string
+		StringList                               []string
+	}
+	byIdx := make(map[string]*entry)
+
+	prefix := "MessageAttribute."
+	for k, vs := range params {
+		if !strings.HasPrefix(k, prefix) || len(vs) == 0 {
+			continue
+		}
+		rest := k[len(prefix):] // "1.Name" ou "1.StringListValue.3"
+		dot := strings.IndexByte(rest, '.')
+		if dot < 0 {
+			continue
+		}
+		idx := rest[:dot]
+		field := rest[dot+1:]
+		if _, ok := byIdx[idx]; !ok {
+			byIdx[idx] = &entry{}
+		}
+		e := byIdx[idx]
+		v := vs[0]
+		switch {
+		case field == "Name":
+			e.Name = v
+		case field == "DataType":
+			e.DataType = v
+		case field == "StringValue":
+			e.StringValue = v
+		case field == "BinaryValue":
+			e.BinaryValue = v
+		case strings.HasPrefix(field, "StringListValue."):
+			e.StringList = append(e.StringList, v)
+		}
+	}
+
+	for _, e := range byIdx {
+		if e.Name == "" || e.DataType == "" {
+			continue
+		}
+		switch e.DataType {
+		case "String", "Number":
+			out[e.Name] = MessageAttributeValue{
+				DataType:    e.DataType,
+				StringValue: e.StringValue,
+			}
+		case "Binary":
+			out[e.Name] = MessageAttributeValue{
+				DataType:    "Binary",
+				BinaryValue: decodeBase64(e.BinaryValue),
+			}
+		case "String.List":
+			out[e.Name] = MessageAttributeValue{
+				DataType:    "String.List",
+				StringValue: joinList(e.StringList),
+			}
+		}
+	}
+	return out
+}
+
+// MessageAttributeValue é o formato interno para MessageAttribute parsed.
+//
+// StringValue para tipos simples (String, Number) E serialização compact
+// de String.List (valores separados por |). BinaryValue para Binary.
+type MessageAttributeValue struct {
+	DataType    string
+	StringValue string
+	BinaryValue []byte
+}
+
+// decodeBase64 decodifica base64 padrão; em erro retorna slice vazio.
+func decodeBase64(s string) []byte {
+	if s == "" {
+		return nil
+	}
+	dec, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil
+	}
+	return dec
+}
+
+// joinList serializa lista como valores separados por | (decode em service).
+func joinList(items []string) string {
+	return strings.Join(items, "|")
+}
+
+// ExtractQuerySystemAttributes extrai pares Attribute.N.Name/Value do form-encoded.
+//
+// System Attributes SQS (SentTimestamp, ApproximateReceiveCount, etc.) usam
+// "Attribute.N.Name" e "Attribute.N.Value" (não MessageAttribute).
+func ExtractQuerySystemAttributes(params url.Values) map[string]string {
+	out := make(map[string]string)
+	prefix := "Attribute."
+	for k, vs := range params {
+		if !strings.HasPrefix(k, prefix) || len(vs) == 0 {
+			continue
+		}
+		rest := k[len(prefix):]
+		dot := strings.IndexByte(rest, '.')
+		if dot < 0 {
+			continue
+		}
+		idx := rest[:dot]
+		field := rest[dot+1:]
+		if field == "Name" {
+			name := vs[0]
+			valueKey := prefix + idx + ".Value"
+			if vvs, ok := params[valueKey]; ok && len(vvs) > 0 {
+				out[name] = vvs[0]
+			}
+		}
 	}
 	return out
 }
