@@ -309,6 +309,12 @@ func (s *Service) GetQueueAttributes(ctx context.Context, params *GetQueueAttrib
 		return nil, err
 	}
 
+	// Aproxima depth — leitura best-effort do stream. Em erro, devolve 0.
+	depth := "0"
+	if d, derr := s.storage.Messages().QueueDepth(ctx, params.QueueName); derr == nil {
+		depth = fmt.Sprintf("%d", d)
+	}
+
 	allAttrs := map[string]string{
 		"VisibilityTimeout":            fmt.Sprintf("%d", q.Attributes.VisibilityTimeout),
 		"MessageRetentionPeriod":       fmt.Sprintf("%d", q.Attributes.MessageRetentionPeriod),
@@ -316,7 +322,7 @@ func (s *Service) GetQueueAttributes(ctx context.Context, params *GetQueueAttrib
 		"DelaySeconds":                 fmt.Sprintf("%d", q.Attributes.DelaySeconds),
 		"ReceiveMessageWaitTimeSeconds": fmt.Sprintf("%d", q.Attributes.ReceiveMessageWaitTimeSeconds),
 		"QueueArn":                     protocol.NewSQSARN(s.region, s.accountID, q.Name).String(),
-		"ApproximateNumberOfMessages":  "0", // TODO Semana 3: usar QueueDepth
+		"ApproximateNumberOfMessages":  depth,
 		"ApproximateNumberOfMessagesNotVisible": "0",
 		"CreatedTimestamp":             fmt.Sprintf("%d", q.CreatedAt.UnixMilli()),
 	}
@@ -475,6 +481,636 @@ func queueNameFromURL(queueURL string) string {
 		return queueURL
 	}
 	return queueURL[idx+1:]
+}
+
+// --- SendMessage ---
+
+// SendMessageParams contém os parâmetros de SendMessage.
+type SendMessageParams struct {
+	QueueName             string
+	QueueURL              string // alternativa a QueueName
+	Body                  string
+	DelaySeconds          int32
+	MessageAttributes     map[string]protocol.MessageAttributeValue
+	MessageSystemAttributes map[string]string
+	MessageGroupId        string // FIFO only
+	MessageDeduplicationId string // FIFO only
+}
+
+// SendMessageResult é o resultado de SendMessage (Query ou JSON).
+type SendMessageResult struct {
+	MessageID    string
+	MD5OfBody    string
+	SequenceNo   string // FIFO only — JetStream Sequence.Stream como string
+}
+
+// SendMessage publica uma mensagem em uma fila.
+//
+// Comportamento AWS:
+//
+//   - Idempotência FIFO via MessageDeduplicationId (Nats-Msg-Id nativo).
+//   - Validação de tamanho (MaximumMessageSize da fila).
+//   - DelaySeconds 0-900 (Standard only; FIFO rejeita).
+func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*SendMessageResult, error) {
+	if params == nil || params.Body == "" {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "MessageBody é obrigatório",
+		}
+	}
+
+	// Resolve QueueName.
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+
+	// Valida DelaySeconds range.
+	if params.DelaySeconds < 0 || params.DelaySeconds > 900 {
+		return nil, &AWSError{
+			Code:    ErrCodeInvalidParameterValue,
+			Message: "DelaySeconds deve estar em [0, 900]",
+		}
+	}
+
+	// Carrega fila para validar FIFO + DelaySeconds.
+	q, err := s.storage.Queues().GetQueue(ctx, params.QueueName)
+	if err != nil {
+		return nil, err
+	}
+	if q.FIFO {
+		if params.DelaySeconds > 0 {
+			return nil, &AWSError{
+				Code:    ErrCodeInvalidParameterValue,
+				Message: "DelaySeconds não é suportado em filas FIFO",
+			}
+		}
+		if params.MessageGroupId == "" {
+			return nil, &AWSError{
+				Code:    ErrCodeMissingParameter,
+				Message: "MessageGroupId é obrigatório em filas FIFO",
+			}
+		}
+	}
+
+	msg := &types.Message{
+		Body:                   params.Body,
+		MessageAttributes:      maValueToTypes(params.MessageAttributes),
+		MessageGroupId:         params.MessageGroupId,
+		MessageDeduplicationId: params.MessageDeduplicationId,
+	}
+
+	saved, err := s.storage.Messages().SendMessage(ctx, params.QueueName, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &SendMessageResult{
+		MessageID: saved.ID,
+		MD5OfBody: saved.MD5OfBody,
+	}
+	if q.FIFO {
+		res.SequenceNo = saved.ID // Sequence.Stream é o ID da mensagem
+	}
+	return res, nil
+}
+
+// SendMessageParamsFromQuery normaliza Query → SendMessageParams.
+//
+// Extrai:
+//   - QueueUrl (preferred em Query)
+//   - MessageBody
+//   - DelaySeconds
+//   - MessageAttribute.N.* (Name, DataType, StringValue, BinaryValue, StringListValue.M)
+//   - MessageGroupId, MessageDeduplicationId
+func SendMessageParamsFromQuery(params url.Values) *SendMessageParams {
+	p := &SendMessageParams{
+		QueueURL:     params.Get("QueueUrl"),
+		QueueName:    params.Get("QueueName"),
+		Body:         params.Get("MessageBody"),
+		DelaySeconds: parseInt32Default(params.Get("DelaySeconds"), 0),
+		MessageAttributes: protocol.ExtractQueryMessageAttributes(params),
+		MessageGroupId:        params.Get("MessageGroupId"),
+		MessageDeduplicationId: params.Get("MessageDeduplicationId"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+	return p
+}
+
+// SendMessageParamsFromJSON normaliza JSON → SendMessageParams.
+func SendMessageParamsFromJSON(params map[string]any) *SendMessageParams {
+	p := &SendMessageParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	if s, ok := params["MessageBody"].(string); ok {
+		p.Body = s
+	}
+	if f, ok := params["DelaySeconds"].(float64); ok {
+		p.DelaySeconds = int32(f)
+	}
+	if s, ok := params["MessageGroupId"].(string); ok {
+		p.MessageGroupId = s
+	}
+	if s, ok := params["MessageDeduplicationId"].(string); ok {
+		p.MessageDeduplicationId = s
+	}
+	p.MessageAttributes = protocol.ExtractJSONMessageAttributes(params)
+	return p
+}
+
+// maValueToTypes converte map[string]protocol.MessageAttributeValue →
+// map[string]types.MessageAttribute.
+func maValueToTypes(in map[string]protocol.MessageAttributeValue) map[string]types.MessageAttribute {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]types.MessageAttribute, len(in))
+	for k, v := range in {
+		out[k] = types.MessageAttribute{
+			DataType:    v.DataType,
+			StringValue: v.StringValue,
+			BinaryValue: v.BinaryValue,
+		}
+	}
+	return out
+}
+
+// --- ReceiveMessage ---
+
+// ReceiveMessageParams contém os parâmetros de ReceiveMessage.
+type ReceiveMessageParams struct {
+	QueueName              string
+	QueueURL               string
+	MaxNumberOfMessages    int32
+	VisibilityTimeout      int32 // 0 → default da fila
+	WaitTimeSeconds        int32 // 0-20; 0 = short-polling
+	ReceiveRequestAttemptId string // idempotência (Semana 4)
+	AttributeNames         []string // "All" | ["SentTimestamp", "ApproximateReceiveCount", ...]
+	MessageAttributeNames  []string // "All" | ["foo", "bar", ...]
+}
+
+// ReceiveMessageResult contém mensagens devolvidas + estado da chamada.
+type ReceiveMessageResult struct {
+	Messages []types.Message
+}
+
+// ReceiveMessage consome mensagens com long-polling.
+//
+// Comportamento AWS:
+//
+//   - VisibilityTimeout 0 → usa default da fila (30s SQS).
+//   - WaitTimeSeconds 0-20; 0 = poll curto.
+//   - MaxNumberOfMessages 1-10 (clamp).
+//   - System attributes (SentTimestamp etc.) sempre incluídos; extras via
+//     AttributeNames.
+//   - MessageAttributeNames: ["All"] ou lista explícita.
+//
+// Sem mensagens: retorna Messages vazio (não erro).
+func (s *Service) ReceiveMessage(ctx context.Context, params *ReceiveMessageParams) (*ReceiveMessageResult, error) {
+	if params == nil {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "params é nil",
+		}
+	}
+
+	// Resolve QueueName.
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return nil, &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+
+	// Validação de ranges.
+	if params.MaxNumberOfMessages < 0 {
+		return nil, &AWSError{
+			Code:    ErrCodeInvalidParameterValue,
+			Message: "MaxNumberOfMessages não pode ser negativo",
+		}
+	}
+	if params.MaxNumberOfMessages == 0 {
+		params.MaxNumberOfMessages = 1
+	}
+	if params.MaxNumberOfMessages > 10 {
+		params.MaxNumberOfMessages = 10
+	}
+	if params.WaitTimeSeconds < 0 || params.WaitTimeSeconds > 20 {
+		return nil, &AWSError{
+			Code:    ErrCodeInvalidParameterValue,
+			Message: "WaitTimeSeconds deve estar em [0, 20]",
+		}
+	}
+	if params.VisibilityTimeout < 0 || params.VisibilityTimeout > 43200 {
+		return nil, &AWSError{
+			Code:    ErrCodeInvalidParameterValue,
+			Message: "VisibilityTimeout deve estar em [0, 43200]",
+		}
+	}
+
+	msgs, err := s.storage.Messages().ReceiveMessage(
+		ctx,
+		params.QueueName,
+		params.MaxNumberOfMessages,
+		params.WaitTimeSeconds,
+		params.VisibilityTimeout,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filtra System Attributes conforme AttributeNames.
+	wantAllSys := len(params.AttributeNames) == 0
+	for _, n := range params.AttributeNames {
+		if n == "All" {
+			wantAllSys = true
+			break
+		}
+	}
+	// Filtra MessageAttributes conforme MessageAttributeNames.
+	wantAllMA := len(params.MessageAttributeNames) == 0
+	for _, n := range params.MessageAttributeNames {
+		if n == "All" {
+			wantAllMA = true
+			break
+		}
+	}
+
+	out := make([]types.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if !wantAllSys {
+			filtered := make(map[string]string)
+			for _, n := range params.AttributeNames {
+				if v, ok := m.Attributes[n]; ok {
+					filtered[n] = v
+				}
+			}
+			m.Attributes = filtered
+		}
+		if !wantAllMA {
+			filtered := make(map[string]types.MessageAttribute)
+			for _, n := range params.MessageAttributeNames {
+				if v, ok := m.MessageAttributes[n]; ok {
+					filtered[n] = v
+				}
+			}
+			m.MessageAttributes = filtered
+		}
+		out = append(out, m)
+	}
+	return &ReceiveMessageResult{Messages: out}, nil
+}
+
+// ReceiveMessageParamsFromQuery normaliza Query → ReceiveMessageParams.
+func ReceiveMessageParamsFromQuery(params url.Values) *ReceiveMessageParams {
+	p := &ReceiveMessageParams{
+		QueueURL:               params.Get("QueueUrl"),
+		QueueName:              params.Get("QueueName"),
+		MaxNumberOfMessages:    parseInt32Default(params.Get("MaxNumberOfMessages"), 1),
+		VisibilityTimeout:      parseInt32Default(params.Get("VisibilityTimeout"), 0),
+		WaitTimeSeconds:        parseInt32Default(params.Get("WaitTimeSeconds"), 0),
+		ReceiveRequestAttemptId: params.Get("ReceiveRequestAttemptId"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+
+	// AttributeName.N e MessageAttributeName.N
+	for i := 1; ; i++ {
+		key := fmt.Sprintf("AttributeName.%d", i)
+		if v, ok := params[key]; ok && len(v) > 0 {
+			p.AttributeNames = append(p.AttributeNames, v[0])
+		} else {
+			break
+		}
+	}
+	for i := 1; ; i++ {
+		key := fmt.Sprintf("MessageAttributeName.%d", i)
+		if v, ok := params[key]; ok && len(v) > 0 {
+			p.MessageAttributeNames = append(p.MessageAttributeNames, v[0])
+		} else {
+			break
+		}
+	}
+	return p
+}
+
+// ReceiveMessageParamsFromJSON normaliza JSON → ReceiveMessageParams.
+func ReceiveMessageParamsFromJSON(params map[string]any) *ReceiveMessageParams {
+	p := &ReceiveMessageParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	if f, ok := params["MaxNumberOfMessages"].(float64); ok {
+		p.MaxNumberOfMessages = int32(f)
+	}
+	if f, ok := params["VisibilityTimeout"].(float64); ok {
+		p.VisibilityTimeout = int32(f)
+	}
+	if f, ok := params["WaitTimeSeconds"].(float64); ok {
+		p.WaitTimeSeconds = int32(f)
+	}
+	if s, ok := params["ReceiveRequestAttemptId"].(string); ok {
+		p.ReceiveRequestAttemptId = s
+	}
+	if raw, ok := params["AttributeName"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					p.AttributeNames = append(p.AttributeNames, s)
+				}
+			}
+		}
+	}
+	if raw, ok := params["MessageAttributeName"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					p.MessageAttributeNames = append(p.MessageAttributeNames, s)
+				}
+			}
+		}
+	}
+	if p.MaxNumberOfMessages == 0 {
+		p.MaxNumberOfMessages = 1
+	}
+	return p
+}
+
+// --- DeleteMessage ---
+
+// DeleteMessageParams contém os parâmetros de DeleteMessage.
+type DeleteMessageParams struct {
+	QueueName      string
+	QueueURL       string
+	ReceiptHandle  string
+}
+
+// DeleteMessage remove uma mensagem (ack).
+//
+// Comportamento AWS:
+//
+//   - Idempotente: deletar 2x é OK.
+//   - Receipt handle expirado: ReceiptHandleIsInvalid.
+func (s *Service) DeleteMessage(ctx context.Context, params *DeleteMessageParams) error {
+	if params == nil || params.ReceiptHandle == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "ReceiptHandle é obrigatório",
+		}
+	}
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+	return s.storage.Messages().DeleteMessage(ctx, params.QueueName, params.ReceiptHandle)
+}
+
+// DeleteMessageParamsFromQuery normaliza Query → DeleteMessageParams.
+func DeleteMessageParamsFromQuery(params url.Values) *DeleteMessageParams {
+	p := &DeleteMessageParams{
+		QueueName:     params.Get("QueueName"),
+		QueueURL:      params.Get("QueueUrl"),
+		ReceiptHandle: params.Get("ReceiptHandle"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+	return p
+}
+
+// DeleteMessageParamsFromJSON normaliza JSON → DeleteMessageParams.
+func DeleteMessageParamsFromJSON(params map[string]any) *DeleteMessageParams {
+	p := &DeleteMessageParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	if s, ok := params["ReceiptHandle"].(string); ok {
+		p.ReceiptHandle = s
+	}
+	return p
+}
+
+// --- ChangeMessageVisibility ---
+
+// ChangeMessageVisibilityParams contém os parâmetros.
+type ChangeMessageVisibilityParams struct {
+	QueueName         string
+	QueueURL          string
+	ReceiptHandle     string
+	VisibilityTimeout int32
+}
+
+// ChangeMessageVisibility redefine visibility timeout de uma mensagem.
+func (s *Service) ChangeMessageVisibility(ctx context.Context, params *ChangeMessageVisibilityParams) error {
+	if params == nil || params.ReceiptHandle == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "ReceiptHandle é obrigatório",
+		}
+	}
+	if params.VisibilityTimeout < 0 || params.VisibilityTimeout > 43200 {
+		return &AWSError{
+			Code:    ErrCodeInvalidParameterValue,
+			Message: "VisibilityTimeout deve estar em [0, 43200]",
+		}
+	}
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+	return s.storage.Messages().ChangeMessageVisibility(ctx, params.QueueName, params.ReceiptHandle, params.VisibilityTimeout)
+}
+
+// ChangeMessageVisibilityParamsFromQuery normaliza Query → ChangeMessageVisibilityParams.
+func ChangeMessageVisibilityParamsFromQuery(params url.Values) *ChangeMessageVisibilityParams {
+	p := &ChangeMessageVisibilityParams{
+		QueueName:         params.Get("QueueName"),
+		QueueURL:          params.Get("QueueUrl"),
+		ReceiptHandle:     params.Get("ReceiptHandle"),
+		VisibilityTimeout: parseInt32Default(params.Get("VisibilityTimeout"), 0),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+	return p
+}
+
+// ChangeMessageVisibilityParamsFromJSON normaliza JSON → ChangeMessageVisibilityParams.
+func ChangeMessageVisibilityParamsFromJSON(params map[string]any) *ChangeMessageVisibilityParams {
+	p := &ChangeMessageVisibilityParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	if s, ok := params["ReceiptHandle"].(string); ok {
+		p.ReceiptHandle = s
+	}
+	if f, ok := params["VisibilityTimeout"].(float64); ok {
+		p.VisibilityTimeout = int32(f)
+	}
+	return p
+}
+
+// --- PurgeQueue ---
+
+// PurgeQueueParams contém os parâmetros.
+type PurgeQueueParams struct {
+	QueueName string
+	QueueURL  string
+}
+
+// PurgeQueue esvazia a fila sem removê-la.
+//
+// Comportamento AWS: devolve sucesso sempre (mesmo se fila vazia).
+// SQS devolve PurgeQueueInProgress se chamado em <60s após o anterior;
+// não implementamos essa limitação no MVP.
+func (s *Service) PurgeQueue(ctx context.Context, params *PurgeQueueParams) error {
+	if params == nil {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "params é nil",
+		}
+	}
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+	return s.storage.Queues().PurgeQueue(ctx, params.QueueName)
+}
+
+// PurgeQueueParamsFromQuery normaliza Query → PurgeQueueParams.
+func PurgeQueueParamsFromQuery(params url.Values) *PurgeQueueParams {
+	p := &PurgeQueueParams{
+		QueueName: params.Get("QueueName"),
+		QueueURL:  params.Get("QueueUrl"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+	return p
+}
+
+// PurgeQueueParamsFromJSON normaliza JSON → PurgeQueueParams.
+func PurgeQueueParamsFromJSON(params map[string]any) *PurgeQueueParams {
+	p := &PurgeQueueParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	return p
+}
+
+// --- SetQueueAttributes ---
+
+// SetQueueAttributesParams contém os parâmetros.
+type SetQueueAttributesParams struct {
+	QueueName  string
+	QueueURL   string
+	Attributes map[string]string
+}
+
+// SetQueueAttributes atualiza atributos de uma fila existente.
+func (s *Service) SetQueueAttributes(ctx context.Context, params *SetQueueAttributesParams) error {
+	if params == nil || len(params.Attributes) == 0 {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "Attribute.N.Name/Value é obrigatório",
+		}
+	}
+	if params.QueueName == "" && params.QueueURL != "" {
+		params.QueueName = queueNameFromURL(params.QueueURL)
+	}
+	if params.QueueName == "" {
+		return &AWSError{
+			Code:    ErrCodeMissingParameter,
+			Message: "QueueUrl ou QueueName é obrigatório",
+		}
+	}
+
+	attrs := types.QueueAttributes{
+		VisibilityTimeout:            parseInt32Default(params.Attributes["VisibilityTimeout"], 0),
+		MessageRetentionPeriod:       parseInt32Default(params.Attributes["MessageRetentionPeriod"], 0),
+		MaximumMessageSize:           parseInt32Default(params.Attributes["MaximumMessageSize"], 0),
+		DelaySeconds:                 parseInt32Default(params.Attributes["DelaySeconds"], 0),
+		ReceiveMessageWaitTimeSeconds: parseInt32Default(params.Attributes["ReceiveMessageWaitTimeSeconds"], 0),
+		ContentBasedDeduplication:    params.Attributes["ContentBasedDeduplication"] == "true",
+	}
+	if err := validateAttributes(attrs); err != nil {
+		return err
+	}
+	return s.storage.Queues().SetQueueAttributes(ctx, params.QueueName, attrs)
+}
+
+// SetQueueAttributesParamsFromQuery normaliza Query → SetQueueAttributesParams.
+func SetQueueAttributesParamsFromQuery(params url.Values) *SetQueueAttributesParams {
+	p := &SetQueueAttributesParams{
+		QueueName:  params.Get("QueueName"),
+		QueueURL:   params.Get("QueueUrl"),
+		Attributes: extractAttributes(params, "Attribute"),
+	}
+	if p.QueueName == "" && p.QueueURL != "" {
+		p.QueueName = queueNameFromURL(p.QueueURL)
+	}
+	return p
+}
+
+// SetQueueAttributesParamsFromJSON normaliza JSON → SetQueueAttributesParams.
+func SetQueueAttributesParamsFromJSON(params map[string]any) *SetQueueAttributesParams {
+	p := &SetQueueAttributesParams{}
+	if s, ok := params["QueueUrl"].(string); ok {
+		p.QueueURL = s
+		p.QueueName = queueNameFromURL(s)
+	}
+	if s, ok := params["QueueName"].(string); ok {
+		p.QueueName = s
+	}
+	p.Attributes = protocol.ExtractJSONAttributes(params, "Attribute", "Name")
+	return p
 }
 
 // DeleteQueueParamsFromQuery normaliza Query → DeleteQueueParams.
@@ -644,15 +1280,15 @@ func AsAWSError(err error) *AWSError {
 	if errors.Is(err, storage.ErrQueueAlreadyExists) {
 		return &AWSError{Code: ErrCodeQueueAlreadyExists, Message: err.Error()}
 	}
-	var tooLarge *storage.ErrMessageTooLargeT
+	var tooLarge storage.ErrMessageTooLargeT
 	if errors.As(err, &tooLarge) {
 		return &AWSError{Code: ErrCodeMessageTooLarge, Message: err.Error()}
 	}
-	var invalidRH *storage.ErrInvalidReceiptHandleT
+	var invalidRH storage.ErrInvalidReceiptHandleT
 	if errors.As(err, &invalidRH) {
 		return &AWSError{Code: ErrCodeReceiptHandleIsInvalid, Message: err.Error()}
 	}
-	var invalidArg *storage.ErrInvalidArgumentT
+	var invalidArg storage.ErrInvalidArgumentT
 	if errors.As(err, &invalidArg) {
 		return &AWSError{Code: ErrCodeInvalidParameterValue, Message: err.Error()}
 	}
