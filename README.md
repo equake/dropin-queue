@@ -31,28 +31,70 @@ A camada de API é um **shim em Go** (`shimd`) que implementa:
 
 ## Status atual
 
-**Fase 1 — Semana 1 (setup inicial).**
+**Fase 1 (SQS Standard — leitura/metadados) ✅ completa.**
+**Fase 2 (SQS Standard — operações de mensagem) ✅ completa.**
 
-O que já funciona:
+### Operações SQS implementadas (11/11 do Standard)
 
-- Bootstrap do projeto (Go module, docker-compose dev, Makefile, CI)
-- HTTP server com middleware (logging, recovery, métricas)
-- Cliente NATS JetStream com reconexão automática
-- Primeira operação SQS implementada: `CreateQueue` (protocolo Query)
-- Smoke test ponta-a-ponta: `boto3` cria fila contra o shim com sucesso
+| Operação                | Protocolo Query | Protocolo JSON | Testes E2E |
+|-------------------------|:--------------:|:--------------:|:----------:|
+| `CreateQueue`           | ✅             | ✅             | ✅         |
+| `GetQueueUrl`           | ✅             | ✅             | ✅         |
+| `GetQueueAttributes`    | ✅             | ✅             | ✅         |
+| `ListQueues`            | ✅             | ✅             | ✅         |
+| `DeleteQueue`           | ✅             | ✅             | ✅         |
+| `SetQueueAttributes`    | ✅             | ✅             | ✅         |
+| `SendMessage`           | ✅             | ✅             | ✅         |
+| `ReceiveMessage`        | ✅             | ✅             | ✅         |
+| `DeleteMessage`         | ✅             | ✅             | ✅         |
+| `ChangeMessageVisibility`| ✅            | ✅             | ✅         |
+| `PurgeQueue`            | ✅             | ✅             | ✅         |
 
-O que vem a seguir:
+**Cobertura de testes:** 27/27 passando (12 smoke + 15 messages) em ~14s contra
+shim rodando em docker-compose com NATS JetStream 2.10 + MinIO.
 
-- SQS Standard: `SendMessage`, `ReceiveMessage` (long-poll), `DeleteMessage`,
-  `ChangeMessageVisibility`, `PurgeQueue`, `DeleteQueue`, `GetQueueAttributes`,
-  `GetQueueUrl`, `ListQueues`, DLQ
-- SNS: `CreateTopic`, `Subscribe` (sqs/http/https), `Publish`, `ListSubscriptions`,
-  `Unsubscribe`, `DeleteTopic`, `ConfirmSubscription`
-- SQS FIFO: `MessageGroupId`, `MessageDeduplicationId`, ordering
-- Batch: `SendMessageBatch`, `DeleteMessageBatch`
-- Verificação SigV4 + IAM store
-- Terraform módulos (network, compute, broker, api, observability, objectstore)
-- Hardening produção (HA, backup/restore, runbooks)
+### O que já funciona
+
+- Bootstrap do projeto (Go module, docker-compose dev, Makefile, CI com 4 jobs)
+- HTTP server com middleware (logging, recovery, métricas Prometheus, tracing OTel)
+- Cliente NATS JetStream com reconexão automática + cache de pending msgs
+- Persistência de metadados em JetStream KV (`queue_meta`)
+- Sanitização de nomes de fila → subjects NATS
+- DUAL protocol AWS (Query form+XML e JSON 1.0 simultaneamente)
+- DUAL format JSON 1.0 para `Attributes` (array E map compacto boto3 ≥1.40)
+- Round-trip de `MessageAttribute` preservando `DataType`: String, Number,
+  Binary (base64), String.List
+- Long-polling nativo via `FetchMaxWait` do JetStream (substitui `WaitTimeSeconds`)
+- Visibility timeout via `AckWait` + `NakWithDelay`
+- Receipt handles versionados (`rh1:<consumer>:<seq>`) com cache de ack
+- Consumer durável único por fila (AckExplicitPolicy, MaxAckPending=1000)
+- FIFO queues parcialmente funcional (MessageGroupId validado + SequenceNumber)
+- 18 commits granulares em português, cada um com mensagem detalhada
+
+### O que vem a seguir
+
+- **Fase 3 — Batch + FIFO completo:**
+  - `SendMessageBatch`, `DeleteMessageBatch`
+  - FIFO ordering completo (preservação de ordem dentro do grupo)
+- **Fase 4 — SNS:** `CreateTopic`, `Subscribe` (sqs/http/https), `Publish`,
+  `ListSubscriptions`, fan-out com filter policy
+- **Fase 5 — Auth real:** Verificação SigV4 + IAM store (policy JSON evaluation) + CLI `shimctl`
+- **Fase 6 — Provisioning:** Terraform módulos production-ready (network,
+  compute, broker, api, observability, objectstore)
+- **Fase 7 — Hardening produção:** HA multi-AZ, backup/restore, runbooks,
+  SLOs, alerting rules
+
+### Limitações conhecidas (MVP)
+
+- **AUTH_MODE=off** — sem verificação SigV4 no dev; qualquer credencial é aceita
+- **Sem IAM** — policy evaluation não implementada
+- **Consumer único por fila** — não suporta múltiplos clients paralelos
+  consumindo da mesma fila (SQS Standard permite). Solução em prod: sharding
+  por partition key (FIFO) ou round-robin assignment (Standard)
+- **AproximateNumberOfMessages** é contado a partir de `Stream.State.Msgs`
+  que inclui mensagens já acked (lag de update do JetStream)
+- **Sem SNS ainda** — apenas SQS; subscriptions HTTP/HTTPS precisam de job
+  server assíncrono
 
 ---
 
@@ -76,6 +118,9 @@ make smoke
 
 # Você deve ver:
 # test/integration/test_sqs_smoke.py::test_create_queue PASSED
+# test/integration/test_sqs_messages.py::test_send_and_receive_single PASSED
+# test/integration/test_sqs_messages.py::test_delete_message PASSED
+# ... 27 passed in ~14s
 
 # Inspecionar logs do shim
 make logs-shim
