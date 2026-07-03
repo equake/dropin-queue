@@ -31,6 +31,11 @@ A camada de API é um **shim em Go** (`dropin-server`) que implementa:
 
 ## Status atual
 
+> Instruções para agentes IA (Claude Code, Aider, Cursor, etc) que venham a trabalhar
+> neste repo: ver [`AGENTS.md`](AGENTS.md) na raiz e [`docs/gotchas.md`](docs/gotchas.md)
+> antes de implementar qualquer coisa. Em especial: **atualize o README em toda mudança
+> visível ao usuário** — esta seção é a fonte da verdade sobre o que está pronto.
+
 **Fase 1 (SQS Standard — leitura/metadados) ✅ completa.**
 **Fase 2 (SQS Standard — operações de mensagem) ✅ completa.**
 **Fase 3 (Batch + FIFO completo) ✅ completa.**
