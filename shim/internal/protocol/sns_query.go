@@ -34,7 +34,7 @@ func ParseSNSQueryRequest(r *http.Request) (Action, url.Values, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("ler body: %w", err)
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	if len(body) == 0 {
 		return "", nil, errors.New("body vazio")
@@ -98,7 +98,7 @@ func EncodeSNSQueryResponse(w io.Writer, action Action, actionResult interface{}
 			RequestID: requestID,
 		},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	if err := enc.Encode(resp); err != nil {
@@ -121,7 +121,7 @@ func EncodeSNSQueryError(w io.Writer, code, message, requestID string, senderFau
 		},
 		RequestID: requestID,
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	if err := enc.Encode(env); err != nil {

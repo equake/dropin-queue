@@ -55,7 +55,7 @@ func ParseSQSJSONRequest(r *http.Request) (Action, map[string]any, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("ler body: %w", err)
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	if len(body) == 0 {
 		return "", nil, errors.New("body vazio")

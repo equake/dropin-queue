@@ -44,7 +44,7 @@ func ParseSQSQueryRequest(r *http.Request) (Action, url.Values, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("ler body: %w", err)
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	if len(body) == 0 {
 		return "", nil, errors.New("body vazio")
@@ -135,7 +135,7 @@ func EncodeSQSQueryResponse(w io.Writer, action Action, actionResult interface{}
 			RequestID: requestID,
 		},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	if err := enc.Encode(resp); err != nil {
@@ -161,7 +161,7 @@ func EncodeSQSQueryError(w io.Writer, code, message, requestID string, senderFau
 		},
 		RequestID: requestID,
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	if err := enc.Encode(env); err != nil {
@@ -290,9 +290,7 @@ func parseQueryAttrs(params url.Values, prefix string, byIdx map[string]*msgAttr
 		idx := rest[:dot]
 		field := rest[dot+1:]
 		// Achata "Value.DataType" → "DataType", etc.
-		if strings.HasPrefix(field, "Value.") {
-			field = field[len("Value."):]
-		}
+		field = strings.TrimPrefix(field, "Value.")
 		if _, ok := byIdx[idx]; !ok {
 			byIdx[idx] = &msgAttrEntry{}
 		}

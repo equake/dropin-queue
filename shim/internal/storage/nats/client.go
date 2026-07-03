@@ -153,7 +153,7 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 
 	// Valida que o account tem JetStream habilitado.
 	if _, err := js.AccountInfo(ctx); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, fmt.Errorf("jetstream account info: %w", err)
 	}
 
@@ -190,18 +190,6 @@ func (c *Client) queueSubject(queueName string) string {
 // topicSubject retorna o subject JetStream para um tópico.
 func (c *Client) topicSubject(topicName string) string {
 	return c.rawSubject(topicSubjectPrefix + topicName)
-}
-
-// getStreamCached retorna um stream do cache ou busca no broker.
-// Usado para evitar StreamInfo() repetido em hot paths.
-func (c *Client) getStreamCached(ctx context.Context, name string) (jetstream.Stream, bool) {
-	c.mu.RLock()
-	s, ok := c.streams[name]
-	c.mu.RUnlock()
-	if ok {
-		return s, true
-	}
-	return nil, false
 }
 
 // cacheStream adiciona stream ao cache.

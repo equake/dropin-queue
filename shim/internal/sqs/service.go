@@ -355,9 +355,8 @@ func (s *Service) GetQueueAttributes(ctx context.Context, params *GetQueueAttrib
 	for _, n := range params.AttributeNames {
 		if v, ok := allAttrs[n]; ok {
 			out[n] = v
-		} else {
-			// AWS devolve silenciosamente atributos não-conhecidos; ok.
 		}
+		// AWS devolve silenciosamente atributos não-conhecidos; ok.
 	}
 	return out, nil
 }

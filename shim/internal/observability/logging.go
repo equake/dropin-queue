@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -138,9 +137,4 @@ func SetupTracing(ctx context.Context, cfg config.Config, w io.Writer) (func(con
 func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	tracer := otel.Tracer("dropin-queue")
 	return tracer.Start(ctx, name, trace.WithAttributes(attrs...))
-}
-
-// Helper para extrair strings com fallback (usado em middleware).
-func safeString(s string) string {
-	return strings.TrimSpace(s)
 }

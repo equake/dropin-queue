@@ -148,7 +148,7 @@ func isSNSQueryRequest(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	r.Body.Close()
+	_ = r.Body.Close()
 	r.Body = io.NopCloser(strings.NewReader(string(body)))
 
 	vals, err := url.ParseQuery(string(body))
@@ -254,7 +254,10 @@ func (s *Server) handleAWSJSON(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateQueueQuery implementa CreateQueue via protocolo Query (XML response).
 func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
-	defer observability.ObserveHTTP("sqs", string(protocol.ActionCreateQueue), "200", time.Since(time.Now()))
+	start := time.Now()
+	defer func() {
+		observability.ObserveHTTP("sqs", string(protocol.ActionCreateQueue), "200", time.Since(start))
+	}()
 
 	cqp := sqs.CreateQueueParamsFromQuery(params)
 	q, err := s.handlers.SQS.CreateQueue(r.Context(), cqp)
@@ -285,7 +288,7 @@ func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, 
 		Result:   createQueueResult{QueueURL: q.URL},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -304,7 +307,7 @@ func (s *Server) handleCreateQueueJSON(w http.ResponseWriter, r *http.Request, p
 
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
+_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
 }
 
 // writeSQSJSONFatalError serializa erro SQS JSON 1.0 com status correto.
@@ -316,7 +319,7 @@ func writeSQSJSONFatalError(w http.ResponseWriter, code, message string) {
 		status = http.StatusBadRequest
 	}
 	w.WriteHeader(status)
-	protocol.EncodeSQSJSONError(w, code, message)
+_ = protocol.EncodeSQSJSONError(w, code, message)
 }
 
 // statusFromAWSError converte classificação para string de status HTTP.
@@ -356,7 +359,7 @@ func (s *Server) handleGetQueueUrlQuery(w http.ResponseWriter, r *http.Request, 
 		Result:   result{QueueURL: q.URL},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -406,7 +409,7 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		Result:   result{Attribute: attrList},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -440,7 +443,7 @@ func (s *Server) handleListQueuesQuery(w http.ResponseWriter, r *http.Request, p
 		Result:   result{QueueURL: res.QueueUrls},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -467,7 +470,7 @@ func (s *Server) handleDeleteQueueQuery(w http.ResponseWriter, r *http.Request, 
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -485,7 +488,7 @@ func (s *Server) handleGetQueueUrlJSON(w http.ResponseWriter, r *http.Request, p
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
+_ = protocol.EncodeSQSJSONResponse(w, map[string]string{"QueueUrl": q.URL})
 }
 
 func (s *Server) handleGetQueueAttributesJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -498,7 +501,7 @@ func (s *Server) handleGetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	// AWS JSON 1.0 GetQueueAttributes devolve {"Attributes": {"name": "value", ...}}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	protocol.EncodeSQSJSONResponse(w, map[string]map[string]string{
+_ = protocol.EncodeSQSJSONResponse(w, map[string]map[string]string{
 		"Attributes": attrs,
 	})
 }
@@ -512,7 +515,7 @@ func (s *Server) handleListQueuesJSON(w http.ResponseWriter, r *http.Request, pa
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	protocol.EncodeSQSJSONResponse(w, map[string]any{
+_ = protocol.EncodeSQSJSONResponse(w, map[string]any{
 		"QueueUrls": res.QueueUrls,
 	})
 }
@@ -527,7 +530,7 @@ func (s *Server) handleDeleteQueueJSON(w http.ResponseWriter, r *http.Request, p
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
 	// AWS JSON devolve {} em DeleteQueue bem-sucedido.
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 // --- SendMessage ---
@@ -564,7 +567,7 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 		},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -580,7 +583,7 @@ func (s *Server) handleSendMessageJSON(w http.ResponseWriter, r *http.Request, p
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	protocol.EncodeSQSJSONResponse(w, map[string]string{
+_ = protocol.EncodeSQSJSONResponse(w, map[string]string{
 		"MessageId":      res.MessageID,
 		"MD5OfMessage":   res.MD5OfBody,
 		"SequenceNumber": res.SequenceNo,
@@ -668,7 +671,7 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 		Result:   result{Message: out},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -713,7 +716,7 @@ func (s *Server) handleReceiveMessageJSON(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	protocol.EncodeSQSJSONResponse(w, map[string]any{"Messages": out})
+_ = protocol.EncodeSQSJSONResponse(w, map[string]any{"Messages": out})
 }
 
 // --- DeleteMessage ---
@@ -736,7 +739,7 @@ func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -752,7 +755,7 @@ func (s *Server) handleDeleteMessageJSON(w http.ResponseWriter, r *http.Request,
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 // --- ChangeMessageVisibility ---
@@ -775,7 +778,7 @@ func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *ht
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -791,7 +794,7 @@ func (s *Server) handleChangeMessageVisibilityJSON(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 // --- PurgeQueue ---
@@ -814,7 +817,7 @@ func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, p
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -830,7 +833,7 @@ func (s *Server) handlePurgeQueueJSON(w http.ResponseWriter, r *http.Request, pa
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 // --- SetQueueAttributes ---
@@ -853,7 +856,7 @@ func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -869,7 +872,7 @@ func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 // --- SendMessageBatch ---
@@ -942,7 +945,7 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 		})
 	}
 
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1054,7 +1057,7 @@ func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Re
 		})
 	}
 
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1102,14 +1105,14 @@ func (s *Server) handleDeleteMessageBatchJSON(w http.ResponseWriter, r *http.Req
 // healthz é o liveness probe. Retorna 200 se o processo está vivo.
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // readyz é o readiness probe. Retorna 200 se broker está conectado.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if s.handlers.Storage == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"status":"no_storage"}`))
+		_, _ = w.Write([]byte(`{"status":"no_storage"}`))
 		return
 	}
 	// Tenta uma operação leve no storage como health check.
@@ -1117,11 +1120,11 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if _, err := s.handlers.Storage.Queues().ListQueues(ctx, ""); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprintf(w, `{"status":"broker_unavailable","error":%q}`, err.Error())
+		_, _ = fmt.Fprintf(w, `{"status":"broker_unavailable","error":%q}`, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ready"}`))
+	_, _ = w.Write([]byte(`{"status":"ready"}`))
 }
 
 // --- Helpers ---
@@ -1150,7 +1153,7 @@ func writeSQSFatalError(w http.ResponseWriter, code, message, requestID string) 
 		status = http.StatusBadRequest
 	}
 	w.WriteHeader(status)
-	protocol.EncodeSQSQueryError(w, code, message, requestID, awsErr.IsSenderFault())
+	_ = protocol.EncodeSQSQueryError(w, code, message, requestID, awsErr.IsSenderFault())
 }
 
 // newRequestID gera um request ID único estilo AWS (hex 16 chars).
@@ -1261,7 +1264,7 @@ func (s *Server) handleSNSCreateTopicQuery(w http.ResponseWriter, r *http.Reques
 		Result:   result{TopicArn: res.TopicARN},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1308,7 +1311,7 @@ func (s *Server) handleSNSGetTopicAttributesQuery(w http.ResponseWriter, r *http
 		Result:   result{Members: members},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1352,7 +1355,7 @@ func (s *Server) handleSNSListTopicsQuery(w http.ResponseWriter, r *http.Request
 		},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1377,7 +1380,7 @@ func (s *Server) handleSNSDeleteTopicQuery(w http.ResponseWriter, r *http.Reques
 		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1408,7 +1411,7 @@ func (s *Server) handleSNSSubscribeQuery(w http.ResponseWriter, r *http.Request,
 		Result:   result{SubscriptionArn: res.SubscriptionARN},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1433,7 +1436,7 @@ func (s *Server) handleSNSUnsubscribeQuery(w http.ResponseWriter, r *http.Reques
 		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1465,7 +1468,7 @@ func (s *Server) handleSNSPublishQuery(w http.ResponseWriter, r *http.Request, p
 		Result:   result{MessageId: res.MessageID, SequenceNo: res.SequenceNo},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1516,7 +1519,7 @@ func (s *Server) handleSNSConfirmSubscriptionQuery(w http.ResponseWriter, r *htt
 		Result:   result{SubscriptionArn: res.SubscriptionARN},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1570,7 +1573,7 @@ func (s *Server) writeSubscriptionsXML(w http.ResponseWriter, subs []types.Subsc
 		},
 		Metadata: protocol.ResponseMetadata{RequestID: newRequestID()},
 	}
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
@@ -1649,7 +1652,7 @@ func (s *Server) handleSNSDeleteTopicJSON(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 func (s *Server) handleSNSSubscribeJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -1673,7 +1676,7 @@ func (s *Server) handleSNSUnsubscribeJSON(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 func (s *Server) handleSNSPublishJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -1762,7 +1765,7 @@ func writeSNSFatalError(w http.ResponseWriter, code, message, requestID string) 
 		status = http.StatusBadRequest
 	}
 	w.WriteHeader(status)
-	protocol.EncodeSNSQueryError(w, code, message, requestID, awsErr.IsSenderFault())
+	_ = protocol.EncodeSNSQueryError(w, code, message, requestID, awsErr.IsSenderFault())
 }
 
 func writeSNSJSONFatalError(w http.ResponseWriter, code, message string) {
@@ -1773,7 +1776,7 @@ func writeSNSJSONFatalError(w http.ResponseWriter, code, message string) {
 		status = http.StatusBadRequest
 	}
 	w.WriteHeader(status)
-	protocol.EncodeSNSJSONError(w, code, message)
+	_ = protocol.EncodeSNSJSONError(w, code, message)
 }
 
 // ensure unused imports compile in older Go versions

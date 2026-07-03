@@ -239,11 +239,7 @@ type ListTopicsResult struct {
 }
 
 // ListTopics lista todos os tópicos.
-func (s *Service) ListTopics(ctx context.Context, params *ListTopicsParams) (*ListTopicsResult, error) {
-	if params == nil {
-		params = &ListTopicsParams{}
-	}
-
+func (s *Service) ListTopics(ctx context.Context, _ *ListTopicsParams) (*ListTopicsResult, error) {
 	topics, err := s.storage.Topics().ListTopics(ctx, "")
 	if err != nil {
 		return nil, err
@@ -522,10 +518,7 @@ type ListSubscriptionsResult struct {
 }
 
 // ListSubscriptions lista todas as inscrições (de todos os tópicos).
-func (s *Service) ListSubscriptions(ctx context.Context, params *ListSubscriptionsParams) (*ListSubscriptionsResult, error) {
-	if params == nil {
-		params = &ListSubscriptionsParams{}
-	}
+func (s *Service) ListSubscriptions(ctx context.Context, _ *ListSubscriptionsParams) (*ListSubscriptionsResult, error) {
 	subs, err := s.storage.Topics().ListSubscriptions(ctx, "")
 	if err != nil {
 		return nil, err
