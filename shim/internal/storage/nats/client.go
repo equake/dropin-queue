@@ -47,6 +47,20 @@ type Client struct {
 	streams  map[string]jetstream.Stream // cache de streams para evitar lookups repetidos
 	prefix   string                     // prefixo adicional para multi-tenant (futuro)
 	kvCache  jetstream.KeyValue         // cache do bucket de metadados (lazy init)
+
+	// pendingMsgs é um cache de mensagens recebidas mas não confirmadas.
+	// Chave externa: consumerName (efêmero, criado por ReceiveMessage).
+	// Chave interna: stream sequence.
+	// Valor: jetstream.Msg com métodos Ack/Nak.
+	//
+	// Necessário porque Fetch no mesmo consumer após o primeiro não retorna
+	// necessariamente pending messages (depende de estado interno do servidor).
+	// Cache local elimina essa dependência.
+	//
+	// Cleanup: entry é removida após ack/nak. Consumer efêmero é removido
+	// pelo servidor após InactiveThreshold=60s; nesse ponto a entry no map
+	// também deixa de ser referenciada.
+	pendingMsgs map[string]map[uint64]jetstream.Msg
 }
 
 // Options configura a conexão NATS.
@@ -124,10 +138,11 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 	}
 
 	c := &Client{
-		nc:      nc,
-		js:      js,
-		streams: make(map[string]jetstream.Stream),
-		prefix:  opts.Prefix,
+		nc:          nc,
+		js:          js,
+		streams:     make(map[string]jetstream.Stream),
+		prefix:      opts.Prefix,
+		pendingMsgs: make(map[string]map[uint64]jetstream.Msg),
 	}
 
 	// Valida que o account tem JetStream habilitado.

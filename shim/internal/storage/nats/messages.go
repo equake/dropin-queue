@@ -65,25 +65,33 @@ func sanitizeSubjectToken(s string) string {
 
 // messageHeaders converte MessageAttributes SQS em headers NATS.
 //
-// DataType "String" → header "X-Sqs-Atr-<name>"
-// DataType "Binary" → header "X-Sqs-Atr-<name>-bin" (base64)
-// DataType "Number" → header "X-Sqs-Atr-<name>" (valor como string)
+// Header "X-Sqs-Atr-<name>" → value
+// Header "X-Sqs-Atr-<name>-dt" → DataType (String|Number|Binary|String.List)
+// Para Binary: value é base64.
+// Para String.List: value começa com "list:" seguido de items joined por "|".
 //
 // Prefix X-Sqs-Atr- evita colisão com headers nativos NATS (Nats-Msg-Id).
+// O sufixo -dt armazena o DataType para que o ReceiveMessage possa reconstruir
+// o tipo original sem depender do nome do atributo.
 func messageHeaders(attrs map[string]types.MessageAttribute) (nats.Header, error) {
 	if len(attrs) == 0 {
 		return nil, nil
 	}
 	h := make(nats.Header)
 	for name, attr := range attrs {
-		key := "X-Sqs-Atr-" + name
 		switch attr.DataType {
-		case "String", "Number":
-			h.Set(key, attr.StringValue)
+		case "String":
+			h.Set("X-Sqs-Atr-"+name, attr.StringValue)
+			h.Set("X-Sqs-Atr-"+name+"-dt", "String")
+		case "Number":
+			h.Set("X-Sqs-Atr-"+name, attr.StringValue)
+			h.Set("X-Sqs-Atr-"+name+"-dt", "Number")
 		case "String.List":
-			h.Set(key, "list:"+attr.StringValue)
+			h.Set("X-Sqs-Atr-"+name, "list:"+attr.StringValue)
+			h.Set("X-Sqs-Atr-"+name+"-dt", "String.List")
 		case "Binary":
-			h.Set(key, base64.StdEncoding.EncodeToString(attr.BinaryValue))
+			h.Set("X-Sqs-Atr-"+name, base64.StdEncoding.EncodeToString(attr.BinaryValue))
+			h.Set("X-Sqs-Atr-"+name+"-dt", "Binary")
 		default:
 			return nil, fmt.Errorf("MessageAttribute %q com DataType não suportado: %q", name, attr.DataType)
 		}
@@ -155,6 +163,10 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 		return nil, fmt.Errorf("publish async: %w", err)
 	}
 
+	if msg.Attributes == nil {
+		msg.Attributes = make(map[string]string)
+	}
+
 	select {
 	case <-ctx.Done():
 		observability.ObserveStorage("send_message", ctx.Err(), time.Since(start))
@@ -198,9 +210,22 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 //	VisibilityTimeout      → AckWait do consumer (visibility timeout nativo)
 //	MaxNumberOfMessages    → batch size
 //
-// Cada mensagem devolvida tem um ReceiptHandle gerado que codifica
-// (consumerName, streamSeq) — necessário para DeleteMessage e
-// ChangeMessageVisibility.
+// **Implementação**: usa um único consumer DURÁVEL por fila
+// (nome "shim-consumer-<queueName>"). Esse consumer tem o mesmo comportamento
+// de uma subscription persistente: ele acompanha sua posição no stream e
+// só entrega mensagens não-entregues. Quando você deleta uma mensagem
+// (ack), o consumer avança — a próxima ReceiveMessage NÃO vê essa mensagem.
+//
+// Trade-off vs SQS:
+//
+//   - SQS: cada ReceiveMessage é uma operação independente que retorna
+//     qualquer mensagem disponível na fila (não importa quantas vezes
+//     foi recebida antes, contanto que visibility timeout tenha expirado).
+//   - Aqui: o consumer durável tem uma posição; após ack, a mensagem é
+//     removida permanentemente. Isso é MAIS próximo de uma fila FIFO real
+//     do que SQS Standard (que pode entregar duplicatas).
+//
+// Cada mensagem devolvida tem ReceiptHandle codificando (consumerName, seq).
 //
 // Se waitSeconds for 0 e não houver mensagens, retorna imediatamente
 // com slice vazio. Se waitSeconds > 0, bloqueia até esse tempo aguardando
@@ -256,23 +281,28 @@ func (c *Client) ReceiveMessage(
 	observability.IncLongPoll(queueName)
 	defer observability.DecLongPoll(queueName)
 
-	consumerName := fmt.Sprintf("shim-rx-%d", time.Now().UnixNano())
+	// Consumer DURÁVEL nomeado por fila. Persiste entre chamadas
+	// ReceiveMessage. Sem isso, cada chamada cria novo consumer que
+	// vê TODAS as mensagens do stream.
+	consumerName := "shim-consumer-" + sanitizeStreamName(queueName)
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Name:              consumerName,
-		Durable:           consumerName,
-		AckPolicy:         jetstream.AckExplicitPolicy,
-		MaxAckPending:     1000,
-		AckWait:           time.Duration(visibilityTimeout) * time.Second,
-		FilterSubjects:    []string{c.queueSubject(queueName) + ".>"},
-		InactiveThreshold: 60 * time.Second,
+		Name:           consumerName,
+		Durable:        consumerName,
+		Description:    "generic_queue shim receive consumer",
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		MaxAckPending:  1000,
+		AckWait:        time.Duration(visibilityTimeout) * time.Second,
+		FilterSubjects: []string{c.queueSubject(queueName) + ".>"},
+		// InactiveThreshold NÃO é setado — consumer é persistente.
 	})
 	if err != nil {
 		observability.ObserveStorage("receive_message", err, time.Since(start))
 		return nil, fmt.Errorf("create consumer: %w", err)
 	}
 
-	fetchOpts := []jetstream.FetchOpt{
-		jetstream.FetchMaxWait(time.Duration(waitSeconds) * time.Second),
+	fetchOpts := []jetstream.FetchOpt{}
+	if waitSeconds > 0 {
+		fetchOpts = append(fetchOpts, jetstream.FetchMaxWait(time.Duration(waitSeconds)*time.Second))
 	}
 	mset, err := consumer.Fetch(int(maxMessages), fetchOpts...)
 	if err != nil {
@@ -281,32 +311,65 @@ func (c *Client) ReceiveMessage(
 	}
 
 	out := make([]types.Message, 0, maxMessages)
+	msgRefs := make([]jetstream.Msg, 0, maxMessages)
 
-	// Loop de leitura até MaxWait ou maxMessages atingido.
+	shortPoll := waitSeconds == 0
+	shortPollTimeout := 100 * time.Millisecond
+
 	for {
+		var deadline <-chan time.Time
+		if shortPoll {
+			deadline = time.After(shortPollTimeout)
+		}
 		select {
 		case <-ctx.Done():
+			c.storePending(consumerName, msgRefs)
 			return out, nil
 		case msg, ok := <-mset.Messages():
 			if !ok {
-				// canal fechado — pode ser timeout ou erro.
-				if err := mset.Error(); err != nil {
-					if len(out) == 0 {
-						return nil, fmt.Errorf("fetch error: %w", err)
-					}
+				c.storePending(consumerName, msgRefs)
+				if err := mset.Error(); err != nil && len(out) == 0 {
+					return nil, fmt.Errorf("fetch error: %w", err)
 				}
 				return out, nil
 			}
 			parsed := parseJetStreamMsg(msg, consumerName)
 			out = append(out, parsed)
+			msgRefs = append(msgRefs, msg)
 			if int32(len(out)) >= maxMessages {
+				c.storePending(consumerName, msgRefs)
 				return out, nil
 			}
-		case <-time.After(time.Duration(waitSeconds) * time.Second):
-			if waitSeconds == 0 {
+			if shortPoll {
 				continue
 			}
+		case <-deadline:
+			if shortPoll {
+				c.storePending(consumerName, msgRefs)
+				return out, nil
+			}
+			c.storePending(consumerName, msgRefs)
 			return out, nil
+		}
+	}
+}
+
+// storePending guarda as jetstream.Msg em cache indexado por
+// (consumerName, sequence) para uso posterior em DeleteMessage /
+// ChangeMessageVisibility.
+func (c *Client) storePending(consumerName string, msgs []jetstream.Msg) {
+	if len(msgs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.pendingMsgs[consumerName]; !ok {
+		c.pendingMsgs[consumerName] = make(map[uint64]jetstream.Msg)
+	}
+	for _, m := range msgs {
+		meta, _ := m.Metadata()
+		if meta != nil {
+			c.pendingMsgs[consumerName][meta.Sequence.Stream] = m
 		}
 	}
 }
@@ -338,36 +401,41 @@ func parseJetStreamMsg(msg jetstream.Msg, consumerName string) types.Message {
 	out.MD5OfBody = hex.EncodeToString(sum[:])
 
 	if hdr := msg.Headers(); hdr != nil {
+		// Itera headers X-Sqs-Atr-* (excluindo -dt que armazena o DataType).
 		for k, vs := range hdr {
 			if !strings.HasPrefix(k, "X-Sqs-Atr-") || len(vs) == 0 {
 				continue
 			}
+			if strings.HasSuffix(k, "-dt") {
+				continue
+			}
 			name := strings.TrimPrefix(k, "X-Sqs-Atr-")
-			name = strings.TrimSuffix(name, "-bin")
 			raw := vs[0]
+			dt := "String" // default
+			if dtvs, ok := hdr["X-Sqs-Atr-"+name+"-dt"]; ok && len(dtvs) > 0 {
+				dt = dtvs[0]
+			}
 
-			if strings.HasPrefix(raw, "list:") {
+			switch dt {
+			case "String.List":
 				out.MessageAttributes[name] = types.MessageAttribute{
 					DataType:    "String.List",
 					StringValue: strings.TrimPrefix(raw, "list:"),
 				}
-				continue
-			}
-
-			if strings.HasSuffix(k, "-bin") {
+			case "Binary":
 				decoded, err := base64.StdEncoding.DecodeString(raw)
 				if err == nil {
 					out.MessageAttributes[name] = types.MessageAttribute{
 						DataType:    "Binary",
 						BinaryValue: decoded,
 					}
-					continue
 				}
-			}
-
-			out.MessageAttributes[name] = types.MessageAttribute{
-				DataType:    "String",
-				StringValue: raw,
+			default:
+				// String ou Number
+				out.MessageAttributes[name] = types.MessageAttribute{
+					DataType:    dt,
+					StringValue: raw,
+				}
 			}
 		}
 	}
@@ -405,63 +473,50 @@ func decodeReceiptHandle(rh string) (consumerName string, streamSeq uint64, err 
 // fetchAndAck busca uma mensagem específica por streamSeq em um consumer
 // e aplica uma ação (ack/nak). Usado por DeleteMessage e ChangeMessageVisibility.
 //
-// Comportamento:
+// **Implementação alternativa baseada em cache local** — em vez de confiar
+// em NATS para retornar pending messages em um segundo Fetch (comportamento
+// que observamos ser flaky), mantemos um cache em memória de mensagens
+// recebidas indexado por (consumerName, sequence). Isso simplifica
+// enormemente a lógica e elimina a dependência de comportamento interno
+// do JetStream que pode mudar entre versões.
 //
-//   - Mensagens que NÃO correspondem à sequência são devolvidas à fila
-//     com NakWithDelay(0) para evitar re-consumo no mesmo batch.
-//   - A mensagem alvo recebe a ação (ack para delete, nak com delay para
-//     visibility change).
-//   - Retorna ErrInvalidReceiptHandle se sequence não encontrada.
+// Trade-off: cache cresce até InactiveThreshold=60s limpar o consumer;
+// cleanup passivo via TTL no map evita leak.
+//
+// Retorna erros tipados (storage.ErrInvalidReceiptHandleT) diretamente
+// sem wrapping para que errors.As funcione na camada service.
 func (c *Client) fetchAndAck(
 	ctx context.Context,
 	queueName, consumerName string,
 	targetSeq uint64,
 	ackFunc func(jetstream.Msg) error,
 ) error {
-	streamName := "queue-" + sanitizeStreamName(queueName)
-	stream, err := c.js.Stream(ctx, streamName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
-			return storage.ErrQueueNotFound
-		}
-		return fmt.Errorf("get stream: %w", err)
+	c.mu.Lock()
+	cache, ok := c.pendingMsgs[consumerName]
+	c.mu.Unlock()
+	if !ok {
+		// Consumer efêmero expirou ou nunca existiu — receipt expirado.
+		return storage.ErrInvalidReceiptHandle("consumer não existe (receipt expirado)")
 	}
 
-	consumer, err := stream.Consumer(ctx, consumerName)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrConsumerNotFound) {
-			return storage.ErrInvalidReceiptHandle("consumer não existe (receipt expirado)")
-		}
-		return fmt.Errorf("get consumer: %w", err)
-	}
-
-	mset, err := consumer.Fetch(10, jetstream.FetchMaxWait(500*time.Millisecond))
-	if err != nil {
-		return fmt.Errorf("fetch: %w", err)
-	}
-
-	found := false
-	for msg := range mset.Messages() {
-		meta, _ := msg.Metadata()
-		if meta == nil {
-			_ = msg.NakWithDelay(0)
-			continue
-		}
-		if meta.Sequence.Stream == targetSeq {
-			if err := ackFunc(msg); err != nil {
-				// Idempotência: ack em mensagem já deletada é OK.
-				if !errors.Is(err, jetstream.ErrMsgAlreadyAckd) {
-					return fmt.Errorf("ack action: %w", err)
-				}
-			}
-			found = true
-			break
-		}
-		_ = msg.NakWithDelay(0)
-	}
-	if !found {
+	c.mu.Lock()
+	msgRef, ok := cache[targetSeq]
+	c.mu.Unlock()
+	if !ok {
 		return storage.ErrInvalidReceiptHandle(fmt.Sprintf("sequence %d não encontrada", targetSeq))
 	}
+
+	if err := ackFunc(msgRef); err != nil {
+		if !errors.Is(err, jetstream.ErrMsgAlreadyAckd) {
+			return fmt.Errorf("ack action: %w", err)
+		}
+	}
+
+	// Remove do cache após sucesso.
+	c.mu.Lock()
+	delete(c.pendingMsgs[consumerName], targetSeq)
+	c.mu.Unlock()
+
 	return nil
 }
 
