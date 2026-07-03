@@ -20,7 +20,7 @@ func TestIsValidQueueName(t *testing.T) {
 		{"a", true},
 		{"", false},
 		{"queue.with.spaces and more", false},
-		{".fifo", true},        // suffix válido
+		{".fifo", true},          // suffix válido
 		{"my.fifo.queue", false}, // .fifo deve ser no final
 		{"queue.com.unicode.ç", false},
 	}
@@ -55,14 +55,14 @@ func TestIsValidQueueName_Length(t *testing.T) {
 
 func TestExtractAttributes(t *testing.T) {
 	v := url.Values{
-		"Attribute.1.Name":          {"VisibilityTimeout"},
-		"Attribute.1.Value":         {"60"},
-		"Attribute.2.Name":          {"MaximumMessageSize"},
-		"Attribute.2.Value":         {"65536"},
-		"Attribute.3.Name":          {"FifoQueue"},
-		"Attribute.3.Value":         {"true"},
-		"Tag.1.Name":                {"env"},
-		"Tag.1.Value":               {"prod"},
+		"Attribute.1.Name":  {"VisibilityTimeout"},
+		"Attribute.1.Value": {"60"},
+		"Attribute.2.Name":  {"MaximumMessageSize"},
+		"Attribute.2.Value": {"65536"},
+		"Attribute.3.Name":  {"FifoQueue"},
+		"Attribute.3.Value": {"true"},
+		"Tag.1.Name":        {"env"},
+		"Tag.1.Value":       {"prod"},
 	}
 	got := extractAttributes(v, "Attribute")
 	want := map[string]string{

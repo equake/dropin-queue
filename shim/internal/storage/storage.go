@@ -68,7 +68,7 @@ type ErrInvalidReceiptHandleT string
 func (e ErrInvalidReceiptHandleT) Error() string { return string(e) }
 
 // Shorthands para uso ergonômico no storage.
-func ErrInvalidArgument(msg string) error  { return ErrInvalidArgumentT(msg) }
+func ErrInvalidArgument(msg string) error { return ErrInvalidArgumentT(msg) }
 func ErrMessageTooLarge(body, max int) error {
 	return ErrMessageTooLargeT{BodyBytes: body, MaxBytes: max}
 }

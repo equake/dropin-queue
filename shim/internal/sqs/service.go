@@ -166,12 +166,12 @@ func (s *Service) CreateQueue(ctx context.Context, params *CreateQueueParams) (*
 		AccountID: s.accountID,
 		Region:    s.region,
 		Attributes: types.QueueAttributes{
-			VisibilityTimeout:            parseInt32Default(params.Attributes["VisibilityTimeout"], types.DefaultQueueAttributes().VisibilityTimeout),
-			MessageRetentionPeriod:       parseInt32Default(params.Attributes["MessageRetentionPeriod"], types.DefaultQueueAttributes().MessageRetentionPeriod),
-			MaximumMessageSize:           parseInt32Default(params.Attributes["MaximumMessageSize"], types.DefaultQueueAttributes().MaximumMessageSize),
-			DelaySeconds:                 parseInt32Default(params.Attributes["DelaySeconds"], types.DefaultQueueAttributes().DelaySeconds),
+			VisibilityTimeout:             parseInt32Default(params.Attributes["VisibilityTimeout"], types.DefaultQueueAttributes().VisibilityTimeout),
+			MessageRetentionPeriod:        parseInt32Default(params.Attributes["MessageRetentionPeriod"], types.DefaultQueueAttributes().MessageRetentionPeriod),
+			MaximumMessageSize:            parseInt32Default(params.Attributes["MaximumMessageSize"], types.DefaultQueueAttributes().MaximumMessageSize),
+			DelaySeconds:                  parseInt32Default(params.Attributes["DelaySeconds"], types.DefaultQueueAttributes().DelaySeconds),
 			ReceiveMessageWaitTimeSeconds: parseInt32Default(params.Attributes["ReceiveMessageWaitTimeSeconds"], types.DefaultQueueAttributes().ReceiveMessageWaitTimeSeconds),
-			ContentBasedDeduplication:    params.Attributes["ContentBasedDeduplication"] == "true",
+			ContentBasedDeduplication:     params.Attributes["ContentBasedDeduplication"] == "true",
 		},
 		Tags:      params.Tags,
 		FIFO:      strings.HasSuffix(params.QueueName, ".fifo") || params.Attributes["FifoQueue"] == "true",
@@ -288,8 +288,8 @@ func GetQueueUrlParamsFromJSON(params map[string]any) *GetQueueUrlParams {
 
 // GetQueueAttributesParams contém os parâmetros de GetQueueAttributes.
 type GetQueueAttributesParams struct {
-	QueueName       string
-	AttributeNames  []string // ["All"] ou lista de nomes específicos
+	QueueName      string
+	AttributeNames []string // ["All"] ou lista de nomes específicos
 }
 
 // GetQueueAttributes devolve os atributos de uma fila.
@@ -316,15 +316,15 @@ func (s *Service) GetQueueAttributes(ctx context.Context, params *GetQueueAttrib
 	}
 
 	allAttrs := map[string]string{
-		"VisibilityTimeout":            fmt.Sprintf("%d", q.Attributes.VisibilityTimeout),
-		"MessageRetentionPeriod":       fmt.Sprintf("%d", q.Attributes.MessageRetentionPeriod),
-		"MaximumMessageSize":           fmt.Sprintf("%d", q.Attributes.MaximumMessageSize),
-		"DelaySeconds":                 fmt.Sprintf("%d", q.Attributes.DelaySeconds),
-		"ReceiveMessageWaitTimeSeconds": fmt.Sprintf("%d", q.Attributes.ReceiveMessageWaitTimeSeconds),
-		"QueueArn":                     protocol.NewSQSARN(s.region, s.accountID, q.Name).String(),
-		"ApproximateNumberOfMessages":  depth,
+		"VisibilityTimeout":                     fmt.Sprintf("%d", q.Attributes.VisibilityTimeout),
+		"MessageRetentionPeriod":                fmt.Sprintf("%d", q.Attributes.MessageRetentionPeriod),
+		"MaximumMessageSize":                    fmt.Sprintf("%d", q.Attributes.MaximumMessageSize),
+		"DelaySeconds":                          fmt.Sprintf("%d", q.Attributes.DelaySeconds),
+		"ReceiveMessageWaitTimeSeconds":         fmt.Sprintf("%d", q.Attributes.ReceiveMessageWaitTimeSeconds),
+		"QueueArn":                              protocol.NewSQSARN(s.region, s.accountID, q.Name).String(),
+		"ApproximateNumberOfMessages":           depth,
 		"ApproximateNumberOfMessagesNotVisible": "0",
-		"CreatedTimestamp":             fmt.Sprintf("%d", q.CreatedAt.UnixMilli()),
+		"CreatedTimestamp":                      fmt.Sprintf("%d", q.CreatedAt.UnixMilli()),
 	}
 
 	// "All" ou vazio → tudo.
@@ -487,21 +487,21 @@ func queueNameFromURL(queueURL string) string {
 
 // SendMessageParams contém os parâmetros de SendMessage.
 type SendMessageParams struct {
-	QueueName             string
-	QueueURL              string // alternativa a QueueName
-	Body                  string
-	DelaySeconds          int32
-	MessageAttributes     map[string]protocol.MessageAttributeValue
+	QueueName               string
+	QueueURL                string // alternativa a QueueName
+	Body                    string
+	DelaySeconds            int32
+	MessageAttributes       map[string]protocol.MessageAttributeValue
 	MessageSystemAttributes map[string]string
-	MessageGroupId        string // FIFO only
-	MessageDeduplicationId string // FIFO only
+	MessageGroupId          string // FIFO only
+	MessageDeduplicationId  string // FIFO only
 }
 
 // SendMessageResult é o resultado de SendMessage (Query ou JSON).
 type SendMessageResult struct {
-	MessageID    string
-	MD5OfBody    string
-	SequenceNo   string // FIFO only — JetStream Sequence.Stream como string
+	MessageID  string
+	MD5OfBody  string
+	SequenceNo string // FIFO only — JetStream Sequence.Stream como string
 }
 
 // SendMessage publica uma mensagem em uma fila.
@@ -590,12 +590,12 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 //   - MessageGroupId, MessageDeduplicationId
 func SendMessageParamsFromQuery(params url.Values) *SendMessageParams {
 	p := &SendMessageParams{
-		QueueURL:     params.Get("QueueUrl"),
-		QueueName:    params.Get("QueueName"),
-		Body:         params.Get("MessageBody"),
-		DelaySeconds: parseInt32Default(params.Get("DelaySeconds"), 0),
-		MessageAttributes: protocol.ExtractQueryMessageAttributes(params),
-		MessageGroupId:        params.Get("MessageGroupId"),
+		QueueURL:               params.Get("QueueUrl"),
+		QueueName:              params.Get("QueueName"),
+		Body:                   params.Get("MessageBody"),
+		DelaySeconds:           parseInt32Default(params.Get("DelaySeconds"), 0),
+		MessageAttributes:      protocol.ExtractQueryMessageAttributes(params),
+		MessageGroupId:         params.Get("MessageGroupId"),
 		MessageDeduplicationId: params.Get("MessageDeduplicationId"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
@@ -651,14 +651,14 @@ func maValueToTypes(in map[string]protocol.MessageAttributeValue) map[string]typ
 
 // ReceiveMessageParams contém os parâmetros de ReceiveMessage.
 type ReceiveMessageParams struct {
-	QueueName              string
-	QueueURL               string
-	MaxNumberOfMessages    int32
-	VisibilityTimeout      int32 // 0 → default da fila
-	WaitTimeSeconds        int32 // 0-20; 0 = short-polling
-	ReceiveRequestAttemptId string // idempotência (Semana 4)
-	AttributeNames         []string // "All" | ["SentTimestamp", "ApproximateReceiveCount", ...]
-	MessageAttributeNames  []string // "All" | ["foo", "bar", ...]
+	QueueName               string
+	QueueURL                string
+	MaxNumberOfMessages     int32
+	VisibilityTimeout       int32    // 0 → default da fila
+	WaitTimeSeconds         int32    // 0-20; 0 = short-polling
+	ReceiveRequestAttemptId string   // idempotência (Semana 4)
+	AttributeNames          []string // "All" | ["SentTimestamp", "ApproximateReceiveCount", ...]
+	MessageAttributeNames   []string // "All" | ["foo", "bar", ...]
 }
 
 // ReceiveMessageResult contém mensagens devolvidas + estado da chamada.
@@ -779,11 +779,11 @@ func (s *Service) ReceiveMessage(ctx context.Context, params *ReceiveMessagePara
 // ReceiveMessageParamsFromQuery normaliza Query → ReceiveMessageParams.
 func ReceiveMessageParamsFromQuery(params url.Values) *ReceiveMessageParams {
 	p := &ReceiveMessageParams{
-		QueueURL:               params.Get("QueueUrl"),
-		QueueName:              params.Get("QueueName"),
-		MaxNumberOfMessages:    parseInt32Default(params.Get("MaxNumberOfMessages"), 1),
-		VisibilityTimeout:      parseInt32Default(params.Get("VisibilityTimeout"), 0),
-		WaitTimeSeconds:        parseInt32Default(params.Get("WaitTimeSeconds"), 0),
+		QueueURL:                params.Get("QueueUrl"),
+		QueueName:               params.Get("QueueName"),
+		MaxNumberOfMessages:     parseInt32Default(params.Get("MaxNumberOfMessages"), 1),
+		VisibilityTimeout:       parseInt32Default(params.Get("VisibilityTimeout"), 0),
+		WaitTimeSeconds:         parseInt32Default(params.Get("WaitTimeSeconds"), 0),
 		ReceiveRequestAttemptId: params.Get("ReceiveRequestAttemptId"),
 	}
 	if p.QueueName == "" && p.QueueURL != "" {
@@ -860,9 +860,9 @@ func ReceiveMessageParamsFromJSON(params map[string]any) *ReceiveMessageParams {
 
 // DeleteMessageParams contém os parâmetros de DeleteMessage.
 type DeleteMessageParams struct {
-	QueueName      string
-	QueueURL       string
-	ReceiptHandle  string
+	QueueName     string
+	QueueURL      string
+	ReceiptHandle string
 }
 
 // DeleteMessage remove uma mensagem (ack).
@@ -1073,12 +1073,12 @@ func (s *Service) SetQueueAttributes(ctx context.Context, params *SetQueueAttrib
 	}
 
 	attrs := types.QueueAttributes{
-		VisibilityTimeout:            parseInt32Default(params.Attributes["VisibilityTimeout"], 0),
-		MessageRetentionPeriod:       parseInt32Default(params.Attributes["MessageRetentionPeriod"], 0),
-		MaximumMessageSize:           parseInt32Default(params.Attributes["MaximumMessageSize"], 0),
-		DelaySeconds:                 parseInt32Default(params.Attributes["DelaySeconds"], 0),
+		VisibilityTimeout:             parseInt32Default(params.Attributes["VisibilityTimeout"], 0),
+		MessageRetentionPeriod:        parseInt32Default(params.Attributes["MessageRetentionPeriod"], 0),
+		MaximumMessageSize:            parseInt32Default(params.Attributes["MaximumMessageSize"], 0),
+		DelaySeconds:                  parseInt32Default(params.Attributes["DelaySeconds"], 0),
 		ReceiveMessageWaitTimeSeconds: parseInt32Default(params.Attributes["ReceiveMessageWaitTimeSeconds"], 0),
-		ContentBasedDeduplication:    params.Attributes["ContentBasedDeduplication"] == "true",
+		ContentBasedDeduplication:     params.Attributes["ContentBasedDeduplication"] == "true",
 	}
 	if err := validateAttributes(attrs); err != nil {
 		return err

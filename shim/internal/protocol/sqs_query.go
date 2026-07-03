@@ -22,12 +22,12 @@ import (
 //
 // Formato esperado:
 //
-//   POST / HTTP/1.1
-//   Content-Type: application/x-www-form-urlencoded
-//   X-Amz-Date: 20240101T000000Z
-//   X-Amz-Algorithm: AWS4-HMAC-SHA256
+//	POST / HTTP/1.1
+//	Content-Type: application/x-www-form-urlencoded
+//	X-Amz-Date: 20240101T000000Z
+//	X-Amz-Algorithm: AWS4-HMAC-SHA256
 //
-//   Action=CreateQueue&QueueName=myqueue&Version=2012-11-05
+//	Action=CreateQueue&QueueName=myqueue&Version=2012-11-05
 func ParseSQSQueryRequest(r *http.Request) (Action, url.Values, error) {
 	if r.Method != http.MethodPost {
 		return "", nil, fmt.Errorf("SQS Query requer POST, recebeu %s", r.Method)
@@ -84,10 +84,10 @@ func ParseSQSQueryRequest(r *http.Request) (Action, url.Values, error) {
 //	  </ResponseMetadata>
 //	</Action>Response>
 type SQSQueryResponse struct {
-	XMLName           xml.Name
-	Xmlns             string      `xml:"xmlns,attr"`
-	Result            interface{} `xml:",omitempty"`
-	ResponseMetadata  ResponseMetadata
+	XMLName          xml.Name
+	Xmlns            string      `xml:"xmlns,attr"`
+	Result           interface{} `xml:",omitempty"`
+	ResponseMetadata ResponseMetadata
 }
 
 // ResponseMetadata é o envelope padrão de toda resposta AWS.
@@ -127,9 +127,9 @@ type SQSError struct {
 // requestID: RequestId injetado em ResponseMetadata.
 func EncodeSQSQueryResponse(w io.Writer, action Action, actionResult interface{}, requestID string) error {
 	resp := SQSQueryResponse{
-		XMLName:  xml.Name{Local: string(action) + "Response"},
-		Xmlns:    "http://queue.amazonaws.com/doc/" + AWSProtocolVersion,
-		Result:   actionResult,
+		XMLName: xml.Name{Local: string(action) + "Response"},
+		Xmlns:   "http://queue.amazonaws.com/doc/" + AWSProtocolVersion,
+		Result:  actionResult,
 		ResponseMetadata: ResponseMetadata{
 			RequestID: requestID,
 		},

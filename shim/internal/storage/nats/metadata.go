@@ -31,12 +31,12 @@ const queueMetadataBucket = "queue_meta"
 // created_at: timestamp de criação (RFC3339Nano).
 // updated_at: timestamp do último update de atributos.
 type queueMetadataV1 struct {
-	Version    int                `json:"v"`
-	Attributes map[string]int32   `json:"attributes"`
-	FIFO       bool               `json:"fifo"`
-	Tags       map[string]string  `json:"tags,omitempty"`
-	CreatedAt  time.Time          `json:"created_at"`
-	UpdatedAt  time.Time          `json:"updated_at"`
+	Version    int               `json:"v"`
+	Attributes map[string]int32  `json:"attributes"`
+	FIFO       bool              `json:"fifo"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
 }
 
 // metadataKV gerencia acesso ao bucket JetStream KV de metadados.
@@ -160,10 +160,10 @@ func (c *Client) GetQueue(ctx context.Context, name string) (*types.Queue, error
 
 	// Defaults são a base; metadata sobrescreve se existir.
 	q := &types.Queue{
-		Name:      name,
+		Name:       name,
 		Attributes: types.DefaultQueueAttributes(),
-		CreatedAt: info.Created,
-		FIFO:      strings.HasSuffix(name, ".fifo"),
+		CreatedAt:  info.Created,
+		FIFO:       strings.HasSuffix(name, ".fifo"),
 	}
 
 	md, err := c.loadQueueMetadata(ctx, name)

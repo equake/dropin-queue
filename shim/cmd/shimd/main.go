@@ -37,9 +37,9 @@ import (
 
 	"github.com/anomalyco/generic_queue/shim/internal/config"
 	"github.com/anomalyco/generic_queue/shim/internal/observability"
-	natsstorage "github.com/anomalyco/generic_queue/shim/internal/storage/nats"
 	"github.com/anomalyco/generic_queue/shim/internal/server"
 	"github.com/anomalyco/generic_queue/shim/internal/sqs"
+	natsstorage "github.com/anomalyco/generic_queue/shim/internal/storage/nats"
 )
 
 func main() {

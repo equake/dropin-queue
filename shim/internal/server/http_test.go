@@ -67,12 +67,12 @@ func TestWriteSQSFatalError(t *testing.T) {
 		code   string
 		status int
 	}{
-		{"QueueAlreadyExists", 400},       // sender
-		{"QueueDoesNotExist", 400},        // sender
-		{"InvalidParameterValue", 400},    // sender
-		{"MissingParameter", 400},         // sender
-		{"InternalError", 500},            // receiver
-		{"UnsupportedOperation", 500},     // receiver
+		{"QueueAlreadyExists", 400},    // sender
+		{"QueueDoesNotExist", 400},     // sender
+		{"InvalidParameterValue", 400}, // sender
+		{"MissingParameter", 400},      // sender
+		{"InternalError", 500},         // receiver
+		{"UnsupportedOperation", 500},  // receiver
 	}
 	for _, tc := range tests {
 		var buf bytes.Buffer
@@ -240,7 +240,7 @@ var _ slog.Handler = (*noopHandler)(nil)
 
 type noopHandler struct{}
 
-func (noopHandler) Enabled(context.Context, slog.Level) bool { return false }
+func (noopHandler) Enabled(context.Context, slog.Level) bool  { return false }
 func (noopHandler) Handle(context.Context, slog.Record) error { return nil }
-func (h noopHandler) WithAttrs([]slog.Attr) slog.Handler     { return h }
-func (h noopHandler) WithGroup(string) slog.Handler          { return h }
+func (h noopHandler) WithAttrs([]slog.Attr) slog.Handler      { return h }
+func (h noopHandler) WithGroup(string) slog.Handler           { return h }

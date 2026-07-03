@@ -24,31 +24,31 @@ type Action string
 
 // Operações SQS (subset inicial).
 const (
-	ActionCreateQueue        Action = "CreateQueue"
-	ActionGetQueueUrl        Action = "GetQueueUrl"
-	ActionGetQueueAttributes Action = "GetQueueAttributes"
-	ActionListQueues         Action = "ListQueues"
-	ActionSendMessage        Action = "SendMessage"
-	ActionReceiveMessage     Action = "ReceiveMessage"
-	ActionDeleteMessage      Action = "DeleteMessage"
+	ActionCreateQueue             Action = "CreateQueue"
+	ActionGetQueueUrl             Action = "GetQueueUrl"
+	ActionGetQueueAttributes      Action = "GetQueueAttributes"
+	ActionListQueues              Action = "ListQueues"
+	ActionSendMessage             Action = "SendMessage"
+	ActionReceiveMessage          Action = "ReceiveMessage"
+	ActionDeleteMessage           Action = "DeleteMessage"
 	ActionChangeMessageVisibility Action = "ChangeMessageVisibility"
-	ActionPurgeQueue         Action = "PurgeQueue"
-	ActionDeleteQueue        Action = "DeleteQueue"
-	ActionSetQueueAttributes Action = "SetQueueAttributes"
+	ActionPurgeQueue              Action = "PurgeQueue"
+	ActionDeleteQueue             Action = "DeleteQueue"
+	ActionSetQueueAttributes      Action = "SetQueueAttributes"
 	ActionSendMessageBatch        Action = "SendMessageBatch"
 	ActionDeleteMessageBatch      Action = "DeleteMessageBatch"
 )
 
 // Operações SNS (subset).
 const (
-	ActionCreateTopic       Action = "CreateTopic"
-	ActionGetTopicAttributes Action = "GetTopicAttributes"
-	ActionListTopics        Action = "ListTopics"
-	ActionSubscribe         Action = "Subscribe"
-	ActionUnsubscribe       Action = "Unsubscribe"
-	ActionPublish           Action = "Publish"
-	ActionListSubscriptions Action = "ListSubscriptions"
-	ActionDeleteTopic       Action = "DeleteTopic"
+	ActionCreateTopic         Action = "CreateTopic"
+	ActionGetTopicAttributes  Action = "GetTopicAttributes"
+	ActionListTopics          Action = "ListTopics"
+	ActionSubscribe           Action = "Subscribe"
+	ActionUnsubscribe         Action = "Unsubscribe"
+	ActionPublish             Action = "Publish"
+	ActionListSubscriptions   Action = "ListSubscriptions"
+	ActionDeleteTopic         Action = "DeleteTopic"
 	ActionConfirmSubscription Action = "ConfirmSubscription"
 )
 

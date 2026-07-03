@@ -48,7 +48,7 @@ func TestSanitizeStreamName_Length(t *testing.T) {
 func TestStreamCfg_Defaults(t *testing.T) {
 	c := &Client{prefix: ""}
 	q := types.Queue{
-		Name: "test-queue",
+		Name:       "test-queue",
 		Attributes: types.DefaultQueueAttributes(),
 	}
 	cfg := c.streamCfg(q, true)

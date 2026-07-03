@@ -136,6 +136,7 @@ func (c *Client) CreateQueue(ctx context.Context, q types.Queue) (*types.Queue, 
 	)
 	return &q, nil
 }
+
 // ListQueues lista todas as filas, opcionalmente filtradas por prefixo.
 func (c *Client) ListQueues(ctx context.Context, prefix string) ([]types.Queue, error) {
 	start := time.Now()

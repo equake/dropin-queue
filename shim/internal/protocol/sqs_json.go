@@ -16,11 +16,11 @@ const maxJSONBodyBytes = 10 << 20 // 10 MB
 //
 // Formato esperado:
 //
-//   POST / HTTP/1.1
-//   Content-Type: application/x-amz-json-1.0
-//   X-Amz-Target: AmazonSQS.CreateQueue
+//	POST / HTTP/1.1
+//	Content-Type: application/x-amz-json-1.0
+//	X-Amz-Target: AmazonSQS.CreateQueue
 //
-//   {"QueueName":"my-queue","Attribute":[{"Name":"VisibilityTimeout","Value":"30"}]}
+//	{"QueueName":"my-queue","Attribute":[{"Name":"VisibilityTimeout","Value":"30"}]}
 //
 // Retorna:
 //

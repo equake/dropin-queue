@@ -380,7 +380,7 @@ func (c *Client) storePending(consumerName string, msgs []jetstream.Msg) {
 // ReceiptHandle é setado externamente (precisa do consumer name).
 func parseJetStreamMsg(msg jetstream.Msg, consumerName string) types.Message {
 	out := types.Message{
-		Body:    string(msg.Data()),
+		Body:       string(msg.Data()),
 		EnqueuedAt: time.Now().UTC(),
 		Attributes: map[string]string{
 			"ApproximateReceiveCount": "1",

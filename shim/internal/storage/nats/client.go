@@ -2,11 +2,11 @@
 //
 // Mapeamento:
 //
-//   Fila SQS Standard  →  JetStream Stream com subjects "q.<name>.>"
-//   Fila SQS FIFO      →  JetStream Stream com subjects particionados por group
-//   Tópico SNS         →  JetStream Stream com subject "t.<name>"
-//   Subscriber SQS     →  Consumer durável que republica no stream da queue
-//   Subscriber HTTP    →  Consumer + worker entrega POST
+//	Fila SQS Standard  →  JetStream Stream com subjects "q.<name>.>"
+//	Fila SQS FIFO      →  JetStream Stream com subjects particionados por group
+//	Tópico SNS         →  JetStream Stream com subject "t.<name>"
+//	Subscriber SQS     →  Consumer durável que republica no stream da queue
+//	Subscriber HTTP    →  Consumer + worker entrega POST
 //
 // Esta é a única camada que conhece NATS. Acima dela, tudo fala AWS protocol.
 package nats
@@ -41,12 +41,12 @@ const (
 //
 // Uma instância é segura para uso concorrente — JetStream context é goroutine-safe.
 type Client struct {
-	nc       *nats.Conn
-	js       jetstream.JetStream
-	mu       sync.RWMutex
-	streams  map[string]jetstream.Stream // cache de streams para evitar lookups repetidos
-	prefix   string                     // prefixo adicional para multi-tenant (futuro)
-	kvCache  jetstream.KeyValue         // cache do bucket de metadados (lazy init)
+	nc      *nats.Conn
+	js      jetstream.JetStream
+	mu      sync.RWMutex
+	streams map[string]jetstream.Stream // cache de streams para evitar lookups repetidos
+	prefix  string                      // prefixo adicional para multi-tenant (futuro)
+	kvCache jetstream.KeyValue          // cache do bucket de metadados (lazy init)
 
 	// pendingMsgs é um cache de mensagens recebidas mas não confirmadas.
 	// Chave externa: consumerName (efêmero, criado por ReceiveMessage).

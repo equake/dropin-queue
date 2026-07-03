@@ -112,7 +112,7 @@ func TestExtractJSONAttributes_MapForm(t *testing.T) {
 	// Formato compacto usado por boto3 ≥ 1.40.
 	params := map[string]any{
 		"Attributes": map[string]any{
-			"VisibilityTimeout":  "30",
+			"VisibilityTimeout":      "30",
 			"MessageRetentionPeriod": "86400",
 		},
 	}

@@ -72,12 +72,12 @@ type QueueAttributes struct {
 // DefaultQueueAttributes retorna os defaults oficiais do SQS Standard.
 func DefaultQueueAttributes() QueueAttributes {
 	return QueueAttributes{
-		VisibilityTimeout:            30,
-		MessageRetentionPeriod:       345600,
-		MaximumMessageSize:           262144,
-		DelaySeconds:                 0,
+		VisibilityTimeout:             30,
+		MessageRetentionPeriod:        345600,
+		MaximumMessageSize:            262144,
+		DelaySeconds:                  0,
 		ReceiveMessageWaitTimeSeconds: 0,
-		ContentBasedDeduplication:    false,
+		ContentBasedDeduplication:     false,
 	}
 }
 

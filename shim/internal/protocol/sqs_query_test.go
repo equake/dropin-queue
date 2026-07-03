@@ -2,10 +2,10 @@ package protocol
 
 import (
 	"encoding/xml"
-	"testing"
 	"net/http"
 	"net/url"
 	"strings"
+	"testing"
 )
 
 func TestIsValidAction_SQS(t *testing.T) {
@@ -49,11 +49,11 @@ func TestRequestKind_Validate(t *testing.T) {
 	}{
 		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: ProtocolQuery, Region: "us-east-1"}, true},
 		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: ProtocolJSON, Region: "us-east-1"}, true},
-		{RequestKind{Service: "rds", Action: "Foo"}, false}, // serviço inválido
-		{RequestKind{Service: ServiceSQS, Action: "", Protocol: ProtocolQuery, Region: "us-east-1"}, false}, // action vazia
-		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: "xml", Region: "us-east-1"}, false}, // proto inválido
+		{RequestKind{Service: "rds", Action: "Foo"}, false},                                                                                  // serviço inválido
+		{RequestKind{Service: ServiceSQS, Action: "", Protocol: ProtocolQuery, Region: "us-east-1"}, false},                                  // action vazia
+		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: "xml", Region: "us-east-1"}, false},                           // proto inválido
 		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: ProtocolQuery, AccountID: "123", Region: "us-east-1"}, false}, // account curto
-		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: ProtocolQuery, Region: ""}, false}, // region vazio
+		{RequestKind{Service: ServiceSQS, Action: ActionCreateQueue, Protocol: ProtocolQuery, Region: ""}, false},                            // region vazio
 	}
 	for _, tc := range tests {
 		err := tc.rk.Validate()

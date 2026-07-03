@@ -2,10 +2,10 @@
 //
 // Endpoints:
 //
-//   POST /                  — entrada principal de operações AWS (SQS e SNS)
-//   GET  /healthz           — liveness probe (sempre 200 se processo vivo)
-//   GET  /readyz            — readiness probe (200 só se broker conectado)
-//   GET  /metrics           — Prometheus metrics
+//	POST /                  — entrada principal de operações AWS (SQS e SNS)
+//	GET  /healthz           — liveness probe (sempre 200 se processo vivo)
+//	GET  /readyz            — readiness probe (200 só se broker conectado)
+//	GET  /metrics           — Prometheus metrics
 //
 // O roteamento de operações é feito por inspeção do body
 // (X-Amz-Target header para JSON, action no form-encoded para Query),
@@ -212,8 +212,8 @@ func (s *Server) handleCreateQueueQuery(w http.ResponseWriter, r *http.Request, 
 		QueueURL string   `xml:"QueueUrl"`
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"CreateQueueResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"CreateQueueResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Result   createQueueResult
 		Metadata protocol.ResponseMetadata
 	}
@@ -283,8 +283,8 @@ func (s *Server) handleGetQueueUrlQuery(w http.ResponseWriter, r *http.Request, 
 		QueueURL string   `xml:"QueueUrl"`
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"GetQueueUrlResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"GetQueueUrlResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Result   result
 		Metadata protocol.ResponseMetadata
 	}
@@ -321,8 +321,8 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		Attribute []attr   `xml:"Attribute"`
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"GetQueueAttributesResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"GetQueueAttributesResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Result   result
 		Metadata protocol.ResponseMetadata
 	}
@@ -363,14 +363,14 @@ func (s *Server) handleListQueuesQuery(w http.ResponseWriter, r *http.Request, p
 	}
 
 	type result struct {
-		XMLName   xml.Name `xml:"ListQueuesResult"`
-		QueueURL  []string `xml:"QueueUrl"`
+		XMLName  xml.Name `xml:"ListQueuesResult"`
+		QueueURL []string `xml:"QueueUrl"`
 	}
 	type response struct {
-		XMLName   xml.Name                 `xml:"ListQueuesResponse"`
-		Xmlns     string                   `xml:"xmlns,attr"`
-		Result    result
-		Metadata  protocol.ResponseMetadata
+		XMLName  xml.Name `xml:"ListQueuesResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
+		Result   result
+		Metadata protocol.ResponseMetadata
 	}
 
 	w.Header().Set("Content-Type", "text/xml")
@@ -397,8 +397,8 @@ func (s *Server) handleDeleteQueueQuery(w http.ResponseWriter, r *http.Request, 
 	}
 
 	type response struct {
-		XMLName  xml.Name                  `xml:"DeleteQueueResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"DeleteQueueResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Metadata protocol.ResponseMetadata
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -487,8 +487,8 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 		SequenceNo string   `xml:"SequenceNumber,omitempty"`
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"SendMessageResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"SendMessageResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Result   result
 		Metadata protocol.ResponseMetadata
 	}
@@ -496,7 +496,7 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Content-Type", "text/xml")
 	w.WriteHeader(http.StatusOK)
 	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
+		Xmlns: "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
 		Result: result{
 			MessageID:  res.MessageID,
 			MD5OfBody:  res.MD5OfBody,
@@ -542,26 +542,26 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 		Value string `xml:"Value"`
 	}
 	type msgMA struct {
-		Name       string `xml:"Name"`
-		Value      string `xml:"Value,omitempty"`
-		ValueBin   []byte `xml:"BinaryValue,omitempty"`
+		Name     string `xml:"Name"`
+		Value    string `xml:"Value,omitempty"`
+		ValueBin []byte `xml:"BinaryValue,omitempty"`
 	}
 	type msg struct {
-		XMLName         xml.Name           `xml:"Message"`
-		MessageID       string             `xml:"MessageId"`
-		ReceiptHandle   string             `xml:"ReceiptHandle"`
-		MD5OfBody       string             `xml:"MD5OfBody"`
-		Body            string             `xml:"Body"`
-		Attribute       []msgAttr          `xml:"Attribute"`
-		MessageMA       []msgMA            `xml:"MessageAttribute"`
+		XMLName       xml.Name  `xml:"Message"`
+		MessageID     string    `xml:"MessageId"`
+		ReceiptHandle string    `xml:"ReceiptHandle"`
+		MD5OfBody     string    `xml:"MD5OfBody"`
+		Body          string    `xml:"Body"`
+		Attribute     []msgAttr `xml:"Attribute"`
+		MessageMA     []msgMA   `xml:"MessageAttribute"`
 	}
 	type result struct {
 		XMLName xml.Name `xml:"ReceiveMessageResult"`
 		Message []msg
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"ReceiveMessageResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"ReceiveMessageResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Result   result
 		Metadata protocol.ResponseMetadata
 	}
@@ -666,8 +666,8 @@ func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request
 		return
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"DeleteMessageResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"DeleteMessageResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Metadata protocol.ResponseMetadata
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -705,8 +705,8 @@ func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *ht
 		return
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"ChangeMessageVisibilityResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"ChangeMessageVisibilityResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Metadata protocol.ResponseMetadata
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -744,8 +744,8 @@ func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"PurgeQueueResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"PurgeQueueResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Metadata protocol.ResponseMetadata
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -783,8 +783,8 @@ func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		return
 	}
 	type response struct {
-		XMLName  xml.Name                  `xml:"SetQueueAttributesResponse"`
-		Xmlns    string                    `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"SetQueueAttributesResponse"`
+		Xmlns    string   `xml:"xmlns,attr"`
 		Metadata protocol.ResponseMetadata
 	}
 	w.Header().Set("Content-Type", "text/xml")
