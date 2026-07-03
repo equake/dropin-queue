@@ -64,6 +64,7 @@ Stack:
 - `docs/gotchas.md` — **LEIA ANTES DE IMPLEMENTAR** — bugs que já nos custaram tempo
 - `shim/internal/protocol/` — parsers/serializers AWS (referência para dual protocol)
 - `shim/internal/storage/nats/` — adapter NATS JetStream (referência para KV + streams)
+- `shim/internal/awserr/` — type AWSError compartilhado entre SQS e SNS; sender-fault registry
 - `shim/test/integration/` — testes E2E boto3 (referência para uso correto da API)
 
 ---
@@ -72,7 +73,23 @@ Stack:
 
 - [ ] `make test` passa (testes Go com race detector)
 - [ ] Teste E2E adicionado em `shim/test/integration/` para a nova funcionalidade
-- [ ] `make test-int` passa (70/70 mínimo; deve crescer a cada feature)
+- [ ] `make test-int` passa (70/70 mínimo; deve crescer a cada feature) — atualmente **72/72** pós-refactor/kiss-dry-pass-1
 - [ ] README atualizado: tabela de compatibilidade + seção "Funcionalidades" + comando quickstart se aplicável
 - [ ] Commit em português, mensagem detalhada descrevendo o **porquê** (não só o quê)
 - [ ] `git push origin main` e atualize descrição do repo se a feature mudar o escopo
+
+## 5. Convenções de instrumentação (refactor/kiss-dry-pass-1)
+
+- **Métricas de storage**: usar SEMPRE `observability.StartObserve(op).Done(&err)`
+  em método com named return + `defer`. Chamada explícita de
+  `ObserveStorage` é proibida (causa double-count: pré-fix gerava
+  2× `Inc()` + 2× `Observe()` em sucesso).
+- **Error writers HTTP**: usar `server.writeFatalError(w, transport, code,
+  msg, requestID)`. As 4 funções `write<X><Y>FatalError` foram consolidadas
+  em 1 (Commit 6).
+- **ARN/URL parsing**: usar `protocol.ResourceNameFromARN(arn)` e
+  `protocol.QueueNameFromURL(endpoint)`. Não escrever `strings.Split`
+  inline — formato ARN é estruturalmente idêntico entre SQS/SNS.
+- **Stream names**: usar `queueStreamName(name)` e `topicStreamName(name)`
+  em `storage/nats/client.go`. Não escrever `"queue-"+sanitize...` inline
+  — formato é o índice primário de dados persistidos; rename = data loss.
