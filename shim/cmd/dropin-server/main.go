@@ -1,11 +1,11 @@
-// Command shimd é o entrypoint do clone de SNS/SQS auto-hospedável.
+// Command dropin-server é o entrypoint do clone auto-hospedável de AWS SNS/SQS.
 //
-// shimd faz parse da configuração, conecta ao broker NATS JetStream,
+// dropin-server faz parse da configuração, conecta ao broker NATS JetStream,
 // inicia o servidor HTTP e gerencia shutdown gracioso.
 //
 // Uso:
 //
-//	shimd [flags]
+//	dropin-server [flags]
 //
 // Variáveis de ambiente equivalentes a flags (precedência flag > env > default):
 //
@@ -16,12 +16,12 @@
 // Exemplos:
 //
 //	# dev local (sem TLS, AUTH_MODE=off)
-//	shimd --addr=:4566 --nats-url=nats://localhost:4222
+//	dropin-server --addr=:4566 --nats-url=nats://localhost:4222
 //
 //	# produção (TLS + IAM strict)
-//	shimd --addr=:4566 \
+//	dropin-server --addr=:4566 \
 //	       --nats-url=tls://nats-1.prod:4222 \
-//	       --nats-creds=/etc/shimd/jetstream.creds \
+//	       --nats-creds=/etc/dropin-server/jetstream.creds \
 //	       --auth-mode=strict
 package main
 
@@ -35,17 +35,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anomalyco/generic_queue/shim/internal/config"
-	"github.com/anomalyco/generic_queue/shim/internal/observability"
-	"github.com/anomalyco/generic_queue/shim/internal/server"
-	"github.com/anomalyco/generic_queue/shim/internal/sns"
-	"github.com/anomalyco/generic_queue/shim/internal/sqs"
-	natsstorage "github.com/anomalyco/generic_queue/shim/internal/storage/nats"
+	"github.com/equake/dropin-queue/shim/internal/config"
+	"github.com/equake/dropin-queue/shim/internal/observability"
+	"github.com/equake/dropin-queue/shim/internal/server"
+	"github.com/equake/dropin-queue/shim/internal/sns"
+	"github.com/equake/dropin-queue/shim/internal/sqs"
+	natsstorage "github.com/equake/dropin-queue/shim/internal/storage/nats"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "shimd: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dropin-server: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -59,7 +59,7 @@ func run() error {
 
 	// 2. Logger
 	logger := observability.SetupLogger(cfg)
-	logger.Info("shimd iniciando",
+	logger.Info("dropin-server iniciando",
 		"addr", cfg.Addr,
 		"nats_url", cfg.NATSURL,
 		"account_id", cfg.AccountID,
@@ -91,7 +91,7 @@ func run() error {
 		URL:             cfg.NATSURL,
 		CredentialsFile: cfg.NATSCredentialsFile,
 		CACert:          cfg.NATSCACert,
-		Name:            "shimd",
+		Name:            "dropin-queue",
 		Prefix:          prefix,
 	})
 	if err != nil {
@@ -145,7 +145,7 @@ func run() error {
 		logger.Warn("tracing shutdown", "err", err.Error())
 	}
 
-	logger.Info("shimd encerrado")
+	logger.Info("dropin-server encerrado")
 	return nil
 }
 
