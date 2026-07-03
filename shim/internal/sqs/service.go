@@ -15,65 +15,76 @@ package sqs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/equake/dropin-queue/shim/internal/awserr"
 	"github.com/equake/dropin-queue/shim/internal/observability"
 	"github.com/equake/dropin-queue/shim/internal/protocol"
 	"github.com/equake/dropin-queue/shim/internal/storage"
 	"github.com/equake/dropin-queue/shim/pkg/types"
 )
 
-// AWSErrorCode são os códigos oficiais AWS SQS para erros que devolvemos.
+// AWSError é alias para awserr.Error (preserva call sites do pacote sqs).
+//
+// Pré-refactor (refactor/kiss-dry-pass-1) existia um AWSError local;
+// agora compartilhado entre SQS e SNS, com classificação sender-fault
+// registrada explicitamente via RegisterSenderFaults em init().
+type AWSError = awserr.Error
+
+// Código AWSError compartilhados. As constantes abaixo continuam no
+// pacote sqs por motivos de organização e para evitar import cycle;
+// awserr exporta as constantes equivalentes (Code sem prefixo).
 const (
-	// ErrCodeQueueAlreadyExists: tentativa de criar fila existente com
-	// atributos diferentes.
-	ErrCodeQueueAlreadyExists = "QueueAlreadyExists"
-
-	// ErrCodeQueueDoesNotExist: operação em fila inexistente.
-	ErrCodeQueueDoesNotExist = "QueueDoesNotExist"
-
-	// ErrCodeInvalidParameterValue: parâmetro inválido (nome de fila,
-	// atributo com valor fora do range, etc.).
-	ErrCodeInvalidParameterValue = "InvalidParameterValue"
-
-	// ErrCodeMissingParameter: parâmetro obrigatório ausente.
-	ErrCodeMissingParameter = "MissingParameter"
-
-	// ErrCodeOverLimit: limite de mensagens/filas excedido.
-	ErrCodeOverLimit = "OverLimit"
-
-	// ErrCodeUnsupportedOperation: operação não implementada pelo shim.
-	ErrCodeUnsupportedOperation = "UnsupportedOperation"
-
-	// ErrCodeInternalError: erro interno inesperado.
-	ErrCodeInternalError = "InternalError"
-
-	// ErrCodeMessageTooLarge: body da mensagem excede MaximumMessageSize.
-	ErrCodeMessageTooLarge = "MessageTooLarge"
-
-	// ErrCodeReceiptHandleIsInvalid: receipt handle malformado ou expirado.
-	ErrCodeReceiptHandleIsInvalid = "ReceiptHandleIsInvalid"
-
-	// ErrCodePurgeQueueInProgress: PurgeQueue já está rodando para essa fila
-	// (SQS devolve isso se PurgeQueue for chamado em <60s após o anterior).
-	ErrCodePurgeQueueInProgress = "PurgeQueueInProgress"
-
-	// ErrCodeBatchEntryIdsNotDistinct: SendMessageBatch/DeleteMessageBatch com
-	// Ids duplicados dentro do mesmo batch.
+	ErrCodeQueueAlreadyExists       = awserr.CodeQueueAlreadyExists
+	ErrCodeQueueDoesNotExist        = "QueueDoesNotExist"
+	ErrCodeInvalidParameterValue    = awserr.CodeInvalidParameterValue
+	ErrCodeMissingParameter         = awserr.CodeMissingParameter
+	ErrCodeOverLimit                = awserr.CodeOverLimit
+	ErrCodeUnsupportedOperation     = awserr.CodeUnsupportedOperation
+	ErrCodeInternalError            = awserr.CodeInternalError
+	ErrCodeMessageTooLarge          = awserr.CodeMessageTooLarge
+	ErrCodeReceiptHandleIsInvalid   = awserr.CodeReceiptHandleIsInvalid
+	ErrCodePurgeQueueInProgress     = "PurgeQueueInProgress"
 	ErrCodeBatchEntryIdsNotDistinct = "BatchEntryIdsNotDistinct"
-
-	// ErrCodeTooManyEntriesInBatch: SendMessageBatch/DeleteMessageBatch com
-	// mais de 10 entries.
-	ErrCodeTooManyEntriesInBatch = "TooManyEntriesInBatch"
-
-	// ErrCodeEmptyBatchRequest: SendMessageBatch/DeleteMessageBatch sem entries.
-	ErrCodeEmptyBatchRequest = "EmptyBatchRequest"
+	ErrCodeTooManyEntriesInBatch    = "TooManyEntriesInBatch"
+	ErrCodeEmptyBatchRequest        = "EmptyBatchRequest"
 )
+
+func init() {
+	// Registra codes específicos do SQS como sender-fault (4xx).
+	// Cliente AWS faz retry baseado nesta classificação — divergência
+	// aqui causaria comportamento incorreto.
+	//
+	// INCLUI CodeOverLimit, CodeMessageTooLarge, CodeReceiptHandleIsInvalid
+	// mesmo sendo comuns com SNS — os dois serviços usam e ambos são
+	// sender fault. Idempotente (RegisterSenderFaults pode ser chamado
+	// múltiplas vezes).
+	awserr.RegisterSenderFaults(
+		ErrCodeQueueAlreadyExists,
+		ErrCodeQueueDoesNotExist,
+		ErrCodePurgeQueueInProgress,
+		ErrCodeBatchEntryIdsNotDistinct,
+		ErrCodeTooManyEntriesInBatch,
+		ErrCodeEmptyBatchRequest,
+		ErrCodeOverLimit,
+		ErrCodeMessageTooLarge,
+		ErrCodeReceiptHandleIsInvalid,
+	)
+}
+
+// --- AsAWSError — preserva API para call sites legados. ---
+
+// AsAWSError extrai um AWSError de um erro genérico (storage, raw, etc.).
+//
+// Refatorado no refactor/kiss-dry-pass-1 — antes era lógica duplicada
+// em sqs/service.go e sns/service.go. Agora delega ao awserr.FromStorage.
+func AsAWSError(err error) *AWSError {
+	return awserr.FromStorage(err, ErrCodeQueueDoesNotExist)
+}
 
 // Service implementa as operações SQS.
 //
@@ -510,16 +521,9 @@ const (
 	MaxMessageAttributes = 10
 )
 
-// messageAttributesSize soma o tamanho on-wire dos atributos (nome +
-// DataType + valor). AWS conta os atributos DENTRO do limite de 256 KiB
-// da mensagem — sem contar, atributos viram bypass ilimitado do limite.
-func messageAttributesSize(attrs map[string]protocol.MessageAttributeValue) int {
-	total := 0
-	for name, v := range attrs {
-		total += len(name) + len(v.DataType) + len(v.StringValue) + len(v.BinaryValue)
-	}
-	return total
-}
+// (messageAttributesSize e maValueToTypes movidos para protocol/message_attribute.go
+// em refactor/kiss-dry-pass-1; agora disponíveis como
+// protocol.MessageAttributesSize e protocol.MessageAttributeToTypes.)
 
 // validateMessageAttributes valida a contagem de message attributes.
 func validateMessageAttributes(attrs map[string]protocol.MessageAttributeValue) *AWSError {
@@ -646,7 +650,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 			}
 		}
 		// Atributos contam no limite de 256 KiB do batch (igual AWS).
-		totalBodyBytes += len(e.MessageBody) + messageAttributesSize(e.MessageAttributes)
+		totalBodyBytes += len(e.MessageBody) + protocol.MessageAttributesSize(e.MessageAttributes)
 	}
 	if totalBodyBytes > MaxBatchTotalBytes {
 		return nil, &AWSError{
@@ -709,7 +713,7 @@ func (s *Service) SendMessageBatch(ctx context.Context, params *SendMessageBatch
 
 		msg := &types.Message{
 			Body:                   e.MessageBody,
-			MessageAttributes:      maValueToTypes(e.MessageAttributes),
+			MessageAttributes:      protocol.MessageAttributeToTypes(e.MessageAttributes),
 			MessageGroupId:         e.MessageGroupId,
 			MessageDeduplicationId: e.MessageDeduplicationId,
 		}
@@ -1010,7 +1014,7 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 	if maxSize == 0 {
 		maxSize = MaxBatchTotalBytes
 	}
-	if len(params.Body)+messageAttributesSize(params.MessageAttributes) > maxSize {
+	if len(params.Body)+protocol.MessageAttributesSize(params.MessageAttributes) > maxSize {
 		return nil, &AWSError{
 			Code:    ErrCodeMessageTooLarge,
 			Message: fmt.Sprintf("Mensagem (body + atributos) excede %d bytes", maxSize),
@@ -1033,7 +1037,7 @@ func (s *Service) SendMessage(ctx context.Context, params *SendMessageParams) (*
 
 	msg := &types.Message{
 		Body:                   params.Body,
-		MessageAttributes:      maValueToTypes(params.MessageAttributes),
+		MessageAttributes:      protocol.MessageAttributeToTypes(params.MessageAttributes),
 		MessageGroupId:         params.MessageGroupId,
 		MessageDeduplicationId: params.MessageDeduplicationId,
 	}
@@ -1101,23 +1105,6 @@ func SendMessageParamsFromJSON(params map[string]any) *SendMessageParams {
 	}
 	p.MessageAttributes = protocol.ExtractJSONMessageAttributes(params)
 	return p
-}
-
-// maValueToTypes converte map[string]protocol.MessageAttributeValue →
-// map[string]types.MessageAttribute.
-func maValueToTypes(in map[string]protocol.MessageAttributeValue) map[string]types.MessageAttribute {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]types.MessageAttribute, len(in))
-	for k, v := range in {
-		out[k] = types.MessageAttribute{
-			DataType:    v.DataType,
-			StringValue: v.StringValue,
-			BinaryValue: v.BinaryValue,
-		}
-	}
-	return out
 }
 
 // --- ReceiveMessage ---
@@ -1713,65 +1700,4 @@ func parseInt32Default(s string, def int32) int32 {
 		return def
 	}
 	return int32(n)
-}
-
-// AWSError representa um erro com código oficial AWS.
-type AWSError struct {
-	Code    string
-	Message string
-}
-
-// Error implementa error.
-func (e *AWSError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
-}
-
-// IsSenderFault retorna true se o erro é culpa do cliente (4xx-style).
-func (e *AWSError) IsSenderFault() bool {
-	switch e.Code {
-	case ErrCodeQueueAlreadyExists, ErrCodeQueueDoesNotExist,
-		ErrCodeInvalidParameterValue, ErrCodeMissingParameter,
-		ErrCodeOverLimit, ErrCodeMessageTooLarge,
-		ErrCodeBatchEntryIdsNotDistinct, ErrCodeTooManyEntriesInBatch,
-		ErrCodeEmptyBatchRequest:
-		return true
-	}
-	return false
-}
-
-// AsAWSError tenta extrair um AWSError de um erro genérico.
-// Se não conseguir, cria um AWSError InternalError.
-func AsAWSError(err error) *AWSError {
-	if err == nil {
-		return nil
-	}
-	var awsErr *AWSError
-	if errors.As(err, &awsErr) {
-		return awsErr
-	}
-	if errors.Is(err, storage.ErrQueueNotFound) {
-		return &AWSError{Code: ErrCodeQueueDoesNotExist, Message: err.Error()}
-	}
-	if errors.Is(err, storage.ErrQueueAlreadyExists) {
-		return &AWSError{Code: ErrCodeQueueAlreadyExists, Message: err.Error()}
-	}
-	if errors.Is(err, storage.ErrQueueFull) {
-		// Backlog da fila cheio (DiscardNew rejeitou o publish). OverLimit
-		// sinaliza ao cliente para fazer backoff — nunca descartamos
-		// mensagens antigas silenciosamente.
-		return &AWSError{Code: ErrCodeOverLimit, Message: "fila atingiu o limite de backlog; tente novamente"}
-	}
-	var tooLarge storage.ErrMessageTooLargeT
-	if errors.As(err, &tooLarge) {
-		return &AWSError{Code: ErrCodeMessageTooLarge, Message: err.Error()}
-	}
-	var invalidRH storage.ErrInvalidReceiptHandleT
-	if errors.As(err, &invalidRH) {
-		return &AWSError{Code: ErrCodeReceiptHandleIsInvalid, Message: err.Error()}
-	}
-	var invalidArg storage.ErrInvalidArgumentT
-	if errors.As(err, &invalidArg) {
-		return &AWSError{Code: ErrCodeInvalidParameterValue, Message: err.Error()}
-	}
-	return &AWSError{Code: ErrCodeInternalError, Message: err.Error()}
 }

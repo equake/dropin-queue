@@ -315,11 +315,10 @@ func parseQueryAttrs(params url.Values, prefix string, byIdx map[string]*msgAttr
 //
 // StringValue para tipos simples (String, Number) E serialização compact
 // de String.List (valores separados por |). BinaryValue para Binary.
-type MessageAttributeValue struct {
-	DataType    string
-	StringValue string
-	BinaryValue []byte
-}
+//
+// ATENÇÃO: type movido para message_attribute.go (refactor/kiss-dry-pass-1).
+// Mantido aqui apenas para não quebrar o CI enquanto a migração está em
+// progresso — REMOVER no próximo commit do refactor.
 
 // decodeBase64 decodifica base64 padrão; em erro retorna slice vazio.
 func decodeBase64(s string) []byte {

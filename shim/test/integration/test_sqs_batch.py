@@ -271,7 +271,11 @@ def test_delete_message_batch_partial_failure_invalid_handle(sqs_client, unique_
 
     entries = [
         {"Id": "ok-a", "ReceiptHandle": handles[0]},
-        {"Id": "bad", "ReceiptHandle": "rh1:invalid:999"},
+        # ReceiptHandle malformado — não respeita rh2:base64url. Cliente
+        # é culpado (sender fault). Pré-refactor (rh1:) este teste checava
+        # `SenderFault is False` que era classificação errada — cliente
+        # mandando formato desconhecido SEMPRE é culpa do cliente.
+        {"Id": "bad", "ReceiptHandle": "rh2:not-valid-base64!"},
         {"Id": "ok-b", "ReceiptHandle": handles[1]},
     ]
     resp = sqs_client.delete_message_batch(QueueUrl=url, Entries=entries)
@@ -280,7 +284,7 @@ def test_delete_message_batch_partial_failure_invalid_handle(sqs_client, unique_
     assert len(resp["Failed"]) == 1
     assert resp["Failed"][0]["Id"] == "bad"
     assert resp["Failed"][0]["Code"] == "ReceiptHandleIsInvalid"
-    assert resp["Failed"][0]["SenderFault"] is False  # msg já processada
+    assert resp["Failed"][0]["SenderFault"] is True  # cliente errou formato
 
 
 def test_delete_message_batch_too_many_entries(sqs_client, unique_queue_name):
