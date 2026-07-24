@@ -132,7 +132,7 @@ func FromStorage(err error, notFoundCode string) *Error {
 		errors.Is(err, storage.ErrTopicNotFound):
 		return &Error{Code: notFoundCode, Message: err.Error()}
 	case errors.Is(err, storage.ErrQueueAlreadyExists):
-		return &Error{Code: CodeQueueAlreadyExists, Message: err.Error()}
+		return &Error{Code: CodeQueueNameExists, Message: err.Error()}
 	case errors.Is(err, storage.ErrQueueFull):
 		return &Error{Code: CodeOverLimit,
 			Message: "fila atingiu o limite de backlog; tente novamente"}
@@ -175,15 +175,19 @@ const (
 	CodeUnsupportedOperation = "UnsupportedOperation"
 
 	// Códigos abaixo eram de sqs/ mas como são storage-level
-	// (QueueAlreadyExists = ErrQueueAlreadyExists mapped; QueueFull =
+	// (QueueNameExists = ErrQueueAlreadyExists mapped; QueueFull =
 	// ErrQueueFull mapped) ficam em awserr por conveniência. Pacote sns
 	// não os usa direto pois não tem "Queue" no namespace.
 	//
 	// Se sns precisar de Topic-specific codes no futuro, segue o mesmo
 	// padrão (constante no sns pkg + RegisterSenderFaults em init).
 
-	// CodeQueueAlreadyExists: tentativa de criar fila existente.
-	CodeQueueAlreadyExists = "QueueAlreadyExists"
+	// CodeQueueNameExists: tentativa de criar fila existente com atributos
+	// diferentes. NOME EXATO exigido pelo modelo AWS — confirmado no
+	// shape "QueueNameExists" de botocore/data/sqs/2012-11-05/service-2.json.
+	// "QueueAlreadyExists" (nome anterior desta constante) não existe no
+	// modelo oficial; SDKs reais nunca reconheceriam esse code.
+	CodeQueueNameExists = "QueueNameExists"
 
 	// CodeOverLimit: limite de mensagens/filas excedido (sender fault —
 	// cliente faz backoff).

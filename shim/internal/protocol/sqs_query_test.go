@@ -170,13 +170,13 @@ func TestEncodeSQSQueryResponse(t *testing.T) {
 
 func TestEncodeSQSQueryError(t *testing.T) {
 	var buf strings.Builder
-	err := EncodeSQSQueryError(&buf, "QueueAlreadyExists", "queue exists", "req-456", true)
+	err := EncodeSQSQueryError(&buf, "QueueNameExists", "queue exists", "req-456", true)
 	if err != nil {
 		t.Fatalf("encode error: %v", err)
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "<Code>QueueAlreadyExists</Code>") {
+	if !strings.Contains(out, "<Code>QueueNameExists</Code>") {
 		t.Errorf("deveria conter Code: %s", out)
 	}
 	if !strings.Contains(out, "<Type>Sender</Type>") {

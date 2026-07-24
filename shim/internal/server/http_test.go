@@ -98,7 +98,7 @@ func TestWriteSQSFatalError(t *testing.T) {
 		code   string
 		status int
 	}{
-		{"QueueAlreadyExists", 400},    // sender
+		{"QueueNameExists", 400},       // sender
 		{"QueueDoesNotExist", 400},     // sender
 		{"InvalidParameterValue", 400}, // sender
 		{"MissingParameter", 400},      // sender

@@ -91,8 +91,8 @@ func TestFromStorage_NotFound(t *testing.T) {
 // TestFromStorage_QueueAlreadyExists valida mapeamento direto.
 func TestFromStorage_QueueAlreadyExists(t *testing.T) {
 	got := FromStorage(storage.ErrQueueAlreadyExists, "QueueDoesNotExist")
-	if got.Code != CodeQueueAlreadyExists {
-		t.Errorf("Code: got %s, want %s", got.Code, CodeQueueAlreadyExists)
+	if got.Code != CodeQueueNameExists {
+		t.Errorf("Code: got %s, want %s", got.Code, CodeQueueNameExists)
 	}
 }
 

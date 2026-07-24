@@ -144,7 +144,7 @@ func TestValidateAttributes_OutOfRange(t *testing.T) {
 
 func TestAWSError_IsSenderFault(t *testing.T) {
 	senderCases := []string{
-		ErrCodeQueueAlreadyExists, ErrCodeQueueDoesNotExist,
+		ErrCodeQueueNameExists, ErrCodeQueueDoesNotExist,
 		ErrCodeInvalidParameterValue, ErrCodeMissingParameter,
 		ErrCodeOverLimit,
 	}
