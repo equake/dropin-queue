@@ -83,29 +83,12 @@ func (s *Server) handleGetQueueUrlQuery(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	type result struct {
-		XMLName  xml.Name `xml:"GetQueueUrlResult"`
-		QueueURL string   `xml:"QueueUrl"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"GetQueueUrlResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result:   result{QueueURL: q.URL},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionGetQueueUrl),
+		struct {
+			XMLName  xml.Name `xml:"GetQueueUrlResult"`
+			QueueURL string   `xml:"QueueUrl"`
+		}{QueueURL: q.URL},
+		requestFromContext(r))
 }
 
 // handleGetQueueAttributesQuery implementa GetQueueAttributes (Query).
@@ -121,16 +104,6 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		Name  string `xml:"Name"`
 		Value string `xml:"Value"`
 	}
-	type result struct {
-		XMLName   xml.Name `xml:"GetQueueAttributesResult"`
-		Attribute []attr   `xml:"Attribute"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"GetQueueAttributesResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
 
 	// Ordena chaves para resposta determinística.
 	keys := make([]string, 0, len(attrs))
@@ -144,18 +117,12 @@ func (s *Server) handleGetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		attrList = append(attrList, attr{Name: k, Value: attrs[k]})
 	}
 
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result:   result{Attribute: attrList},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionGetQueueAttributes),
+		struct {
+			XMLName   xml.Name `xml:"GetQueueAttributesResult"`
+			Attribute []attr   `xml:"Attribute"`
+		}{Attribute: attrList},
+		requestFromContext(r))
 }
 
 // handleListQueuesQuery implementa ListQueues (Query).
@@ -167,29 +134,12 @@ func (s *Server) handleListQueuesQuery(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	type result struct {
-		XMLName  xml.Name `xml:"ListQueuesResult"`
-		QueueURL []string `xml:"QueueUrl"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"ListQueuesResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result:   result{QueueURL: res.QueueUrls},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionListQueues),
+		struct {
+			XMLName  xml.Name `xml:"ListQueuesResult"`
+			QueueURL []string `xml:"QueueUrl"`
+		}{QueueURL: res.QueueUrls},
+		requestFromContext(r))
 }
 
 // handleDeleteQueueQuery implementa DeleteQueue (Query).
@@ -200,23 +150,7 @@ func (s *Server) handleDeleteQueueQuery(w http.ResponseWriter, r *http.Request, 
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-
-	type response struct {
-		XMLName  xml.Name `xml:"DeleteQueueResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionDeleteQueue), nil, requestFromContext(r))
 }
 
 // --- Handlers JSON 1.0 ---
@@ -285,35 +219,18 @@ func (s *Server) handleSendMessageQuery(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	type result struct {
-		XMLName    xml.Name `xml:"SendMessageResult"`
-		MessageID  string   `xml:"MessageId"`
-		MD5OfBody  string   `xml:"MD5OfMessage"`
-		SequenceNo string   `xml:"SequenceNumber,omitempty"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"SendMessageResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns: "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result: result{
+	respondSQSQueryXML(w, string(protocol.ActionSendMessage),
+		struct {
+			XMLName    xml.Name `xml:"SendMessageResult"`
+			MessageID  string   `xml:"MessageId"`
+			MD5OfBody  string   `xml:"MD5OfMessage"`
+			SequenceNo string   `xml:"SequenceNumber,omitempty"`
+		}{
 			MessageID:  res.MessageID,
 			MD5OfBody:  res.MD5OfBody,
 			SequenceNo: res.SequenceNo,
 		},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+		requestFromContext(r))
 }
 
 func (s *Server) handleSendMessageJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -364,12 +281,6 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 		XMLName xml.Name `xml:"ReceiveMessageResult"`
 		Message []msg
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"ReceiveMessageResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
 
 	out := make([]msg, 0, len(res.Messages))
 	for _, m := range res.Messages {
@@ -406,18 +317,7 @@ func (s *Server) handleReceiveMessageQuery(w http.ResponseWriter, r *http.Reques
 		out = append(out, mx)
 	}
 
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result:   result{Message: out},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionReceiveMessage), result{Message: out}, requestFromContext(r))
 }
 
 func (s *Server) handleReceiveMessageJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -470,22 +370,7 @@ func (s *Server) handleDeleteMessageQuery(w http.ResponseWriter, r *http.Request
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"DeleteMessageResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionDeleteMessage), nil, requestFromContext(r))
 }
 
 func (s *Server) handleDeleteMessageJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -509,22 +394,7 @@ func (s *Server) handleChangeMessageVisibilityQuery(w http.ResponseWriter, r *ht
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"ChangeMessageVisibilityResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionChangeMessageVisibility), nil, requestFromContext(r))
 }
 
 func (s *Server) handleChangeMessageVisibilityJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -548,22 +418,7 @@ func (s *Server) handlePurgeQueueQuery(w http.ResponseWriter, r *http.Request, p
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"PurgeQueueResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionPurgeQueue), nil, requestFromContext(r))
 }
 
 func (s *Server) handlePurgeQueueJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -587,22 +442,7 @@ func (s *Server) handleSetQueueAttributesQuery(w http.ResponseWriter, r *http.Re
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"SetQueueAttributesResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionSetQueueAttributes), nil, requestFromContext(r))
 }
 
 func (s *Server) handleSetQueueAttributesJSON(w http.ResponseWriter, r *http.Request, params map[string]any) {
@@ -645,13 +485,6 @@ type sendMessageBatchResultQuery struct {
 	Failed     []batchFailureEntryQuery           `xml:"BatchResultErrorEntry"`
 }
 
-type sendMessageBatchResponseQuery struct {
-	XMLName  xml.Name `xml:"SendMessageBatchResponse"`
-	Xmlns    string   `xml:"xmlns,attr"`
-	Result   sendMessageBatchResultQuery
-	Metadata protocol.ResponseMetadata
-}
-
 func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
 	result, err := s.handlers.SQS.SendMessageBatch(r.Context(), sqs.SendMessageBatchParamsFromQuery(params))
 	if err != nil {
@@ -659,19 +492,13 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
 
-	resp := sendMessageBatchResponseQuery{
-		Xmlns: "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result: sendMessageBatchResultQuery{
-			Successful: make([]sendMessageBatchResultEntryQuery, 0, len(result.Successful)),
-			Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
-		},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
+	batchResult := sendMessageBatchResultQuery{
+		Successful: make([]sendMessageBatchResultEntryQuery, 0, len(result.Successful)),
+		Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
 	}
 	for _, e := range result.Successful {
-		resp.Result.Successful = append(resp.Result.Successful, sendMessageBatchResultEntryQuery{
+		batchResult.Successful = append(batchResult.Successful, sendMessageBatchResultEntryQuery{
 			Id:               e.Id,
 			MessageId:        e.MessageID,
 			MD5OfMessageBody: e.MD5OfBody,
@@ -679,7 +506,7 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 		})
 	}
 	for _, e := range result.Failed {
-		resp.Result.Failed = append(resp.Result.Failed, batchFailureEntryQuery{
+		batchResult.Failed = append(batchResult.Failed, batchFailureEntryQuery{
 			Id:          e.Id,
 			Code:        e.Code,
 			Message:     e.Message,
@@ -687,11 +514,7 @@ func (s *Server) handleSendMessageBatchQuery(w http.ResponseWriter, r *http.Requ
 		})
 	}
 
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionSendMessageBatch), batchResult, requestFromContext(r))
 }
 
 // sendMessageBatchResultEntryJSON é uma entry bem-sucedida em JSON.
@@ -762,13 +585,6 @@ type deleteMessageBatchResultQuery struct {
 	Failed     []batchFailureEntryQuery             `xml:"BatchResultErrorEntry"`
 }
 
-type deleteMessageBatchResponseQuery struct {
-	XMLName  xml.Name `xml:"DeleteMessageBatchResponse"`
-	Xmlns    string   `xml:"xmlns,attr"`
-	Result   deleteMessageBatchResultQuery
-	Metadata protocol.ResponseMetadata
-}
-
 func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
 	result, err := s.handlers.SQS.DeleteMessageBatch(r.Context(), sqs.DeleteMessageBatchParamsFromQuery(params))
 	if err != nil {
@@ -776,22 +592,16 @@ func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Re
 		writeFatalError(w, transportSQSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
 
-	resp := deleteMessageBatchResponseQuery{
-		Xmlns: "http://queue.amazonaws.com/doc/" + protocol.AWSProtocolVersion,
-		Result: deleteMessageBatchResultQuery{
-			Successful: make([]deleteMessageBatchResultEntryQuery, 0, len(result.Successful)),
-			Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
-		},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
+	batchResult := deleteMessageBatchResultQuery{
+		Successful: make([]deleteMessageBatchResultEntryQuery, 0, len(result.Successful)),
+		Failed:     make([]batchFailureEntryQuery, 0, len(result.Failed)),
 	}
 	for _, e := range result.Successful {
-		resp.Result.Successful = append(resp.Result.Successful, deleteMessageBatchResultEntryQuery{Id: e.Id})
+		batchResult.Successful = append(batchResult.Successful, deleteMessageBatchResultEntryQuery{Id: e.Id})
 	}
 	for _, e := range result.Failed {
-		resp.Result.Failed = append(resp.Result.Failed, batchFailureEntryQuery{
+		batchResult.Failed = append(batchResult.Failed, batchFailureEntryQuery{
 			Id:          e.Id,
 			Code:        e.Code,
 			Message:     e.Message,
@@ -799,11 +609,7 @@ func (s *Server) handleDeleteMessageBatchQuery(w http.ResponseWriter, r *http.Re
 		})
 	}
 
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSQSQueryXML(w, string(protocol.ActionDeleteMessageBatch), batchResult, requestFromContext(r))
 }
 
 type deleteMessageBatchResultEntryJSON struct {

@@ -101,28 +101,12 @@ func (s *Server) handleSNSCreateTopicQuery(w http.ResponseWriter, r *http.Reques
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type result struct {
-		XMLName  xml.Name `xml:"CreateTopicResult"`
-		TopicArn string   `xml:"TopicArn"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"CreateTopicResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result:   result{TopicArn: res.TopicARN},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionCreateTopic),
+		struct {
+			XMLName  xml.Name `xml:"CreateTopicResult"`
+			TopicArn string   `xml:"TopicArn"`
+		}{TopicArn: res.TopicARN},
+		requestFromContext(r))
 }
 
 func (s *Server) handleSNSGetTopicAttributesQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -137,16 +121,6 @@ func (s *Server) handleSNSGetTopicAttributesQuery(w http.ResponseWriter, r *http
 		Name  string `xml:"Name"`
 		Value string `xml:"Value"`
 	}
-	type result struct {
-		XMLName xml.Name `xml:"GetTopicAttributesResult"`
-		Members []member `xml:"member"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"GetTopicAttributesResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
 	// Ordena chaves para output determinístico.
 	keys := make([]string, 0, len(res.Attributes))
 	for k := range res.Attributes {
@@ -158,18 +132,12 @@ func (s *Server) handleSNSGetTopicAttributesQuery(w http.ResponseWriter, r *http
 		members = append(members, member{Name: k, Value: res.Attributes[k]})
 	}
 
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result:   result{Members: members},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionGetTopicAttributes),
+		struct {
+			XMLName xml.Name `xml:"GetTopicAttributesResult"`
+			Members []member `xml:"member"`
+		}{Members: members},
+		requestFromContext(r))
 }
 
 func (s *Server) handleSNSListTopicsQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -183,37 +151,22 @@ func (s *Server) handleSNSListTopicsQuery(w http.ResponseWriter, r *http.Request
 		XMLName  xml.Name `xml:"member"`
 		TopicArn string   `xml:"TopicArn"`
 	}
-	type result struct {
-		XMLName   xml.Name      `xml:"ListTopicsResult"`
-		Members   []topicMember `xml:"Topics>member"`
-		NextToken string        `xml:"NextToken,omitempty"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"ListTopicsResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
 	members := make([]topicMember, 0, len(res.Topics))
 	for _, t := range res.Topics {
 		arn := protocol.NewSNSARN(s.handlers.SNS.Region(), s.handlers.SNS.AccountID(), t.Name).String()
 		members = append(members, topicMember{TopicArn: arn})
 	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns: "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result: result{
+
+	respondSNSQueryXML(w, string(protocol.ActionListTopics),
+		struct {
+			XMLName   xml.Name      `xml:"ListTopicsResult"`
+			Members   []topicMember `xml:"Topics>member"`
+			NextToken string        `xml:"NextToken,omitempty"`
+		}{
 			Members:   members,
 			NextToken: res.NextToken,
 		},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+		requestFromContext(r))
 }
 
 func (s *Server) handleSNSDeleteTopicQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -223,22 +176,7 @@ func (s *Server) handleSNSDeleteTopicQuery(w http.ResponseWriter, r *http.Reques
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"DeleteTopicResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionDeleteTopic), nil, requestFromContext(r))
 }
 
 func (s *Server) handleSNSSubscribeQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -248,28 +186,12 @@ func (s *Server) handleSNSSubscribeQuery(w http.ResponseWriter, r *http.Request,
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type result struct {
-		XMLName         xml.Name `xml:"SubscribeResult"`
-		SubscriptionArn string   `xml:"SubscriptionArn"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"SubscribeResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result:   result{SubscriptionArn: res.SubscriptionARN},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionSubscribe),
+		struct {
+			XMLName         xml.Name `xml:"SubscribeResult"`
+			SubscriptionArn string   `xml:"SubscriptionArn"`
+		}{SubscriptionArn: res.SubscriptionARN},
+		requestFromContext(r))
 }
 
 func (s *Server) handleSNSUnsubscribeQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -279,22 +201,7 @@ func (s *Server) handleSNSUnsubscribeQuery(w http.ResponseWriter, r *http.Reques
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"UnsubscribeResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionUnsubscribe), nil, requestFromContext(r))
 }
 
 func (s *Server) handleSNSPublishQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -304,29 +211,13 @@ func (s *Server) handleSNSPublishQuery(w http.ResponseWriter, r *http.Request, p
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	type result struct {
-		XMLName    xml.Name `xml:"PublishResult"`
-		MessageId  string   `xml:"MessageId,omitempty"`
-		SequenceNo string   `xml:"SequenceNumber,omitempty"`
-	}
-	type response struct {
-		XMLName  xml.Name `xml:"PublishResponse"`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		Xmlns:    "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result:   result{MessageId: res.MessageID, SequenceNo: res.SequenceNo},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+	respondSNSQueryXML(w, string(protocol.ActionPublish),
+		struct {
+			XMLName    xml.Name `xml:"PublishResult"`
+			MessageId  string   `xml:"MessageId,omitempty"`
+			SequenceNo string   `xml:"SequenceNumber,omitempty"`
+		}{MessageId: res.MessageID, SequenceNo: res.SequenceNo},
+		requestFromContext(r))
 }
 
 func (s *Server) handleSNSListSubscriptionsQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -336,7 +227,8 @@ func (s *Server) handleSNSListSubscriptionsQuery(w http.ResponseWriter, r *http.
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	s.writeSubscriptionsXML(w, r, res.Subscriptions, res.NextToken, "ListSubscriptionsResponse", "ListSubscriptionsResult")
+	s.writeSubscriptionsXML(w, r, res.Subscriptions, res.NextToken,
+		string(protocol.ActionListSubscriptions), "ListSubscriptionsResult")
 }
 
 func (s *Server) handleSNSListSubscriptionsByTopicQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -346,7 +238,8 @@ func (s *Server) handleSNSListSubscriptionsByTopicQuery(w http.ResponseWriter, r
 		writeFatalError(w, transportSNSQuery, awsErr.Code, awsErr.Message, requestFromContext(r))
 		return
 	}
-	s.writeSubscriptionsXML(w, r, res.Subscriptions, res.NextToken, "ListSubscriptionsByTopicResponse", "ListSubscriptionsByTopicResult")
+	s.writeSubscriptionsXML(w, r, res.Subscriptions, res.NextToken,
+		string(protocol.ActionListSubscriptionsByTopic), "ListSubscriptionsByTopicResult")
 }
 
 func (s *Server) handleSNSConfirmSubscriptionQuery(w http.ResponseWriter, r *http.Request, params url.Values) {
@@ -366,10 +259,11 @@ func (s *Server) handleSNSConfirmSubscriptionQuery(w http.ResponseWriter, r *htt
 
 // writeSubscriptionsXML serializa ListSubscriptions / ListSubscriptionsByTopic response.
 //
-// responseTag é o nome do envelope externo (e.g. "ListSubscriptionsResponse").
-// resultTag é o nome do elemento de resultado interno (e.g. "ListSubscriptionsResult"
-// ou "ListSubscriptionsByTopicResult").
-func (s *Server) writeSubscriptionsXML(w http.ResponseWriter, r *http.Request, subs []types.Subscription, nextToken, responseTag, resultTag string) {
+// action é o nome da action AWS (e.g. "ListSubscriptions") — respondSNSQueryXML
+// monta o envelope externo como "<action>Response". resultTag é o nome do
+// elemento de resultado interno (e.g. "ListSubscriptionsResult" ou
+// "ListSubscriptionsByTopicResult").
+func (s *Server) writeSubscriptionsXML(w http.ResponseWriter, r *http.Request, subs []types.Subscription, nextToken, action, resultTag string) {
 	type subMember struct {
 		XMLName         xml.Name `xml:"member"`
 		TopicArn        string   `xml:"TopicArn"`
@@ -383,12 +277,6 @@ func (s *Server) writeSubscriptionsXML(w http.ResponseWriter, r *http.Request, s
 		Members   []subMember `xml:"Subscriptions>member"`
 		NextToken string      `xml:"NextToken,omitempty"`
 	}
-	type response struct {
-		XMLName  xml.Name `xml:""`
-		Xmlns    string   `xml:"xmlns,attr"`
-		Result   result
-		Metadata protocol.ResponseMetadata
-	}
 	members := make([]subMember, 0, len(subs))
 	for _, sub := range subs {
 		members = append(members, subMember{
@@ -399,23 +287,13 @@ func (s *Server) writeSubscriptionsXML(w http.ResponseWriter, r *http.Request, s
 			Owner:           s.handlers.SNS.AccountID(),
 		})
 	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	resp := response{
-		XMLName: xml.Name{Local: responseTag},
-		Xmlns:   "http://sns.amazonaws.com/doc/" + protocol.SNSProtocolVersion,
-		Result: result{
+	respondSNSQueryXML(w, action,
+		result{
 			XMLName:   xml.Name{Local: resultTag},
 			Members:   members,
 			NextToken: nextToken,
 		},
-		Metadata: protocol.ResponseMetadata{RequestID: requestFromContext(r)},
-	}
-	_, _ = w.Write([]byte(xml.Header))
-	enc := xml.NewEncoder(w)
-	enc.Indent("", "  ")
-	_ = enc.Encode(resp)
-	_ = enc.Flush()
+		requestFromContext(r))
 }
 
 // --- SNS JSON handlers ---
