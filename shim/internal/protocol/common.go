@@ -327,10 +327,16 @@ func EncodeSNSJSONResponse(w io.Writer, result any) error {
 
 // EncodeSQSJSONError serializa erro SQS JSON 1.0:
 //
-//	{"__type":"<Code>Exception","message":"<Message>"}
+//	{"__type":"<Code>","message":"<Message>"}
+//
+// __type PRECISA ser o nome exato do shape modelado pela AWS (ex.:
+// "QueueDoesNotExist"), sem sufixo. botocore faz match exato via
+// error_shape.error_code — um "Exception" extra faz o SDK oficial
+// cair sempre em ClientError genérico em vez da exceção tipada
+// (ex.: client.exceptions.QueueDoesNotExist nunca dispara).
 func EncodeSQSJSONError(w io.Writer, code, message string) error {
 	resp := map[string]string{
-		"__type":  code + "Exception",
+		"__type":  code,
 		"message": message,
 	}
 	return json.NewEncoder(w).Encode(resp)
@@ -340,7 +346,7 @@ func EncodeSQSJSONError(w io.Writer, code, message string) error {
 // byte-a-byte idêntico ao SQS (Amazon usou o mesmo envelope).
 func EncodeSNSJSONError(w io.Writer, code, message string) error {
 	resp := map[string]string{
-		"__type":  code + "Exception",
+		"__type":  code,
 		"message": message,
 	}
 	return json.NewEncoder(w).Encode(resp)
