@@ -2,7 +2,6 @@ package observability
 
 import (
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -300,14 +299,6 @@ func (r observeRecorder) Done(err *error) {
 // Útil quando o método tem múltiplas métricas no mesmo defer.
 func (r observeRecorder) Start() time.Time { return r.start }
 
-// ObserveAuth registra uma avaliação IAM/SigV4.
-func ObserveAuth(result string) {
-	if mg == nil {
-		return
-	}
-	mg.authEvaluationsTotal.WithLabelValues(result).Inc()
-}
-
 // SetQueueDepth atualiza gauge de profundidade de fila.
 func SetQueueDepth(queue string, depth float64) {
 	if mg == nil {
@@ -338,21 +329,6 @@ func ObserveLongPollDuration(queue string, d time.Duration) {
 		return
 	}
 	mg.longpollDuration.WithLabelValues(queue).Observe(d.Seconds())
-}
-
-// ObserveSNSPublish registra um Publish SNS.
-func ObserveSNSPublish(topic, status string, duration time.Duration) {
-	if mg == nil {
-		return
-	}
-	mg.snsPublishTotal.WithLabelValues(topic, status).Inc()
-	mg.snsFanoutDuration.WithLabelValues(topic).Observe(duration.Seconds())
-}
-
-// StatusFromHTTP converte http.ResponseWriter status em string.
-// Helper para middleware.
-func StatusFromHTTP(code int) string {
-	return strconv.Itoa(code)
 }
 
 // HTTPStatusRecorder é um ResponseWriter que captura o status code

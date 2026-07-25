@@ -98,9 +98,6 @@ type Service struct {
 	accountID   string
 	region      string
 	endpointURL string // ex: "http://localhost:4566" — usado para construir QueueURL
-
-	// agora é função injetada para permitir mock em testes de tempo.
-	agora func() time.Time
 }
 
 // New cria um Service SQS.
@@ -112,20 +109,7 @@ func New(s storage.Storage, accountID, region, endpointURL string) *Service {
 		accountID:   accountID,
 		region:      region,
 		endpointURL: strings.TrimSuffix(endpointURL, "/"),
-		agora:       time.Now,
 	}
-}
-
-// SetNow injeta clock (usado em testes).
-func (s *Service) SetNow(f func() time.Time) { s.agora = f }
-
-// SQSActionResult é o envelope de resultado para SQS Query.
-//
-// Cada handler específico (CreateQueueResult, ListQueuesResult, etc.)
-// satisfaz esta interface para serialização XML uniforme.
-type SQSActionResult interface {
-	// XMLName local deve ser a tag raiz do result.
-	actionResultTag() string
 }
 
 // --- CreateQueue ---
@@ -147,8 +131,6 @@ type CreateQueueResult struct {
 	QueueURL string `xml:"QueueUrl"`
 }
 
-func (CreateQueueResult) actionResultTag() string { return "" } // handled by encoder
-
 // CreateQueue implementa a operação CreateQueue.
 //
 // Aceita parâmetros vindos do protocolo Query (form-encoded) ou JSON 1.0.
@@ -165,7 +147,7 @@ func (CreateQueueResult) actionResultTag() string { return "" } // handled by en
 //   - Atributos: nomes conhecidos, valores em range
 //   - FIFO suffix .fifo se Attributes.FifoQueue=true
 func (s *Service) CreateQueue(ctx context.Context, params *CreateQueueParams) (*types.Queue, error) {
-	start := s.agora()
+	start := time.Now()
 
 	if params == nil {
 		return nil, &AWSError{
@@ -201,7 +183,7 @@ func (s *Service) CreateQueue(ctx context.Context, params *CreateQueueParams) (*
 		},
 		Tags:      params.Tags,
 		FIFO:      strings.HasSuffix(params.QueueName, ".fifo") || params.Attributes["FifoQueue"] == "true",
-		CreatedAt: s.agora(),
+		CreatedAt: time.Now(),
 	}
 
 	// Valida ranges dos atributos.
@@ -226,7 +208,7 @@ func (s *Service) CreateQueue(ctx context.Context, params *CreateQueueParams) (*
 		"queue", created.Name,
 		"url", created.URL,
 		"fifo", created.FIFO,
-		"duration_ms", s.agora().Sub(start).Milliseconds(),
+		"duration_ms", time.Since(start).Milliseconds(),
 	)
 	return created, nil
 }

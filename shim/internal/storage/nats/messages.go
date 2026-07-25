@@ -636,9 +636,3 @@ func (c *Client) QueueDepth(ctx context.Context, queueName string) (result int64
 	observability.SetQueueDepth(queueName, float64(depth))
 	return depth, nil
 }
-
-// PurgeQueueStorage é wrapper para PurgeQueue em MessageStorage interface.
-// A implementação real está em queues.go.
-func (c *Client) PurgeQueueStorage(ctx context.Context, queueName string) error {
-	return c.PurgeQueue(ctx, queueName)
-}

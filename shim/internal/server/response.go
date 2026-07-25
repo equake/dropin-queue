@@ -54,21 +54,6 @@ const (
 	transportSNSJSON  transport = "sns-json"
 )
 
-// detectTransport decide se o request é SQS/SNS Query/JSON baseado em
-// headers. Pré-fix era feito inline em handleAWS; agora reutilizável.
-func detectTransport(r *http.Request, isSNS bool) transport {
-	if isJSONProtocol(r) {
-		if isSNS {
-			return transportSNSJSON
-		}
-		return transportSQSJSON
-	}
-	if isSNS {
-		return transportSNSQuery
-	}
-	return transportSQSQuery
-}
-
 // contentTypeFor devolve o Content-Type header esperado para o transport.
 func contentTypeFor(t transport) string {
 	switch t {
@@ -255,25 +240,6 @@ func respondQueryXML(w http.ResponseWriter, action, namespace string,
 	enc.Indent("", "  ")
 	_ = enc.Encode(resp)
 	_ = enc.Flush()
-}
-
-// respondJSON serializa a resposta JSON 1.0 bem-sucedida.
-//
-// Substitui ~22 cópias do pattern pré-refactor:
-//
-//	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-//	w.WriteHeader(http.StatusOK)
-//	_ = json.NewEncoder(w).Encode(body)
-//
-// body é o map/struct que o cliente espera. Status permite escolha
-// (200 default; 4xx/5xx para retornos não-200).
-func respondJSON(w http.ResponseWriter, status int, body any) {
-	if status == 0 {
-		status = http.StatusOK
-	}
-	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
 }
 
 // sqsQueryNamespace é a URL canônica do namespace SQS Query (doc 2012-11-05).

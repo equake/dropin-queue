@@ -189,6 +189,41 @@
     Duplicates = cfg.MaxAge }`. Verificado contra nats-server real (não só
     unitário) antes de considerar resolvido.
 
+28. **Sweep de código morto (whole-program, via `golang.org/x/tools/cmd/
+    deadcode ./cmd/dropin-server`) achou um subsistema legado inteiro de
+    encoding Query/JSON em `protocol/common.go`, abandonado mas nunca
+    deletado.** `server/response.go` tem hoje a versão consolidada
+    (`respondQueryXML`/`respondSQSQueryXML`/`respondSNSQueryXML`,
+    `writeFatalError`) que todos os handlers em `server/sqs_handlers.go` e
+    `server/sns_handlers.go` realmente chamam. As funções antigas em
+    `protocol/common.go` (`writeQueryEnvelope`, `EncodeSQSQueryResponse`,
+    `EncodeSNSQueryResponse`, `writeQueryError`, `EncodeSQSQueryError`,
+    `EncodeSNSQueryError`, `EncodeSNSJSONResponse`, `EncodeSQSJSONError`,
+    `EncodeSNSJSONError`) mais `EncodeBase64`
+    (`protocol/message_attribute.go`), `ExtractQuerySystemAttributes`
+    (`protocol/sqs_query.go`) e o tipo `RequestKind` + método `Validate()`
+    (`protocol/types.go`) — tudo isso não tem NENHUM caller de produção,
+    só testes dedicados em `protocol/common_test.go`,
+    `protocol/sqs_query_test.go` e `protocol/sqs_json_test.go` que
+    exercitam a implementação morta isoladamente. Os 4 construtores
+    ergonômicos `InvalidParameter`/`MissingParameter`/`Internal`/
+    `UnsupportedOperation` em `awserr/awserr.go` também nunca foram
+    adotados — call sites em todo o repo constroem `&AWSError{Code: ...,
+    Message: ...}` literal diretamente.
+
+    **Decisão consciente (2026-07-25): catalogado, não removido nesta
+    branch.** É um cleanup real mas grande (~11 símbolos em `protocol/`,
+    exige editar os 3 arquivos de teste cirurgicamente — cada um tem
+    dezenas de outros testes válidos misturados) e sem relação nenhuma com
+    o trabalho de backend Postgres desta branch. Candidato a PR dedicada
+    de limpeza. Itens MENORES do mesmo sweep (só 1 teste dedicado, zero
+    caller de produção, remoção isolada sem tocar teste de outra coisa) —
+    `PurgeQueueStorage` (storage/nats), `Service.SetNow` +
+    `SQSActionResult`/`actionResultTag` (sqs/service.go), `StartSpan`/
+    `ObserveAuth`/`ObserveSNSPublish`/`StatusFromHTTP` (observability/),
+    `respondJSON`/`detectTransport` (server/) — esses SIM foram removidos
+    nesta branch, junto com seus testes dedicados.
+
 ## Convenções de código
 
 17. **Commits em português, mensagens detalhadas** descrevendo o porquê da mudança.
