@@ -38,6 +38,7 @@ import (
 	"net/http"
 
 	"github.com/equake/dropin-queue/shim/internal/awserr"
+	"github.com/equake/dropin-queue/shim/internal/protocol"
 )
 
 // transport identifica qual par service/protocol estamos serializando.
@@ -204,4 +205,83 @@ func encodeJSONError(w http.ResponseWriter, code, message string) error {
 		"message": message,
 	}
 	return json.NewEncoder(w).Encode(resp)
+}
+
+// respondQueryXML serializa a resposta Query (form-encoded + XML) bem-sucedida.
+//
+// Substitui ~22 cópias do pattern pré-refactor:
+//
+//	w.Header().Set("Content-Type", "text/xml")
+//	w.WriteHeader(http.StatusOK)
+//	resp := response{
+//	    XMLName: xml.Name{Local: action + "Response"},
+//	    Xmlns:   namespace,
+//	    Result:  result,
+//	    Metadata: protocol.ResponseMetadata{RequestID: requestID},
+//	}
+//	_, _ = w.Write([]byte(xml.Header))
+//	enc := xml.NewEncoder(w)
+//	enc.Indent("", "  ")
+//	_ = enc.Encode(resp)
+//	_ = enc.Flush()
+//
+// Comportamento byte-a-byte idêntico. `result` é o struct específico da
+// operação — o helper o envelopa em `<Action>Response xmlns="...">...`.
+func respondQueryXML(w http.ResponseWriter, action, namespace string,
+	result any, requestID string) {
+
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+
+	resp := struct {
+		XMLName               xml.Name
+		Xmlns                 string                    `xml:"xmlns,attr"`
+		Result                any                       `xml:",omitempty"`
+		ResponseMetadataInner protocol.ResponseMetadata `xml:"ResponseMetadata"`
+	}{
+		XMLName:               xml.Name{Local: action + "Response"},
+		Xmlns:                 namespace,
+		Result:                result,
+		ResponseMetadataInner: protocol.ResponseMetadata{RequestID: requestID},
+	}
+	_, _ = w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	_ = enc.Encode(resp)
+	_ = enc.Flush()
+}
+
+// respondJSON serializa a resposta JSON 1.0 bem-sucedida.
+//
+// Substitui ~22 cópias do pattern pré-refactor:
+//
+//	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+//	w.WriteHeader(http.StatusOK)
+//	_ = json.NewEncoder(w).Encode(body)
+//
+// body é o map/struct que o cliente espera. Status permite escolha
+// (200 default; 4xx/5xx para retornos não-200).
+func respondJSON(w http.ResponseWriter, status int, body any) {
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// sqsQueryNamespace é a URL canônica do namespace SQS Query (doc 2012-11-05).
+const sqsQueryNamespace = "http://queue.amazonaws.com/doc/2012-11-05"
+
+// snsQueryNamespace é a URL canônica do namespace SNS Query (doc 2010-03-31).
+const snsQueryNamespace = "http://sns.amazonaws.com/doc/2010-03-31"
+
+// respondSQSQueryXML é atalho: respondQueryXML(w, action, sqsQueryNamespace, ...).
+func respondSQSQueryXML(w http.ResponseWriter, action string, result any, requestID string) {
+	respondQueryXML(w, action, sqsQueryNamespace, result, requestID)
+}
+
+// respondSNSQueryXML é atalho: respondQueryXML(w, action, snsQueryNamespace, ...).
+func respondSNSQueryXML(w http.ResponseWriter, action string, result any, requestID string) {
+	respondQueryXML(w, action, snsQueryNamespace, result, requestID)
 }

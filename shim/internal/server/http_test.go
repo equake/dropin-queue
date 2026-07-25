@@ -62,6 +62,37 @@ func TestNewRequestID_Unique(t *testing.T) {
 	}
 }
 
+// TestRequestFromContext_PrefersMiddlewareID valida o bug fix do
+// refactor/kiss-dry-pass-2 Commit 3:
+//
+// Pré-fix: handlers chamavam newRequestID() direto, gerando ID
+// DIFERENTE do que o middleware atribuiu via X-Request-ID header.
+// Pós-fix: requestFromContext(r) prefere o ID do middleware (do
+// context), garantindo consistência entre header e body.
+func TestRequestFromContext_PrefersMiddlewareID(t *testing.T) {
+	req, _ := http.NewRequest("POST", "/", nil)
+	// Simula o middleware já ter setado o ID no context.
+	middlewareID := "req-from-middleware-aaa"
+	ctx := withRequestID(req.Context(), middlewareID)
+	req = req.WithContext(ctx)
+
+	got := requestFromContext(req)
+	if got != middlewareID {
+		t.Errorf("requestFromContext: got %q, want %q (do middleware)", got, middlewareID)
+	}
+}
+
+// TestRequestFromContext_FallbackToNewID valida fallback quando
+// handler é invocado fora do chi stack (testes).
+func TestRequestFromContext_FallbackToNewID(t *testing.T) {
+	req, _ := http.NewRequest("POST", "/", nil)
+	// Sem context com ID = fallback para newRequestID().
+	got := requestFromContext(req)
+	if got == "" {
+		t.Error("fallback deve gerar ID, got empty string")
+	}
+}
+
 func TestWriteSQSFatalError(t *testing.T) {
 	tests := []struct {
 		code   string
