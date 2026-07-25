@@ -167,12 +167,12 @@ func TestEncodeSQSJSONResponse(t *testing.T) {
 
 func TestEncodeSQSJSONError(t *testing.T) {
 	var buf strings.Builder
-	err := EncodeSQSJSONError(&buf, "QueueAlreadyExists", "queue already exists")
+	err := EncodeSQSJSONError(&buf, "QueueNameExists", "queue already exists")
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 	out := strings.TrimSpace(buf.String())
-	if !strings.Contains(out, `"__type":"QueueAlreadyExistsException"`) {
+	if !strings.Contains(out, `"__type":"QueueNameExists"`) {
 		t.Errorf("__type: got %s", out)
 	}
 	if !strings.Contains(out, `"message":"queue already exists"`) {

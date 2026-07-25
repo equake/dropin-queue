@@ -118,7 +118,7 @@ func TestEncodeQueryError_Format(t *testing.T) {
 	}
 	for _, c := range cases {
 		var buf strings.Builder
-		if err := EncodeSQSQueryError(&buf, "QueueAlreadyExists",
+		if err := EncodeSQSQueryError(&buf, "QueueNameExists",
 			"queue exists", "req-xyz", c.senderFault); err != nil {
 			t.Fatal(err)
 		}
@@ -130,15 +130,20 @@ func TestEncodeQueryError_Format(t *testing.T) {
 	}
 }
 
-// TestEncodeJSONError_Format garante o formato __type=CodeException
+// TestEncodeJSONError_Format garante o formato __type=Code (sem sufixo)
 // usado por SQS JSON 1.0 e SNS JSON 1.0 (byte-a-byte idêntico).
+//
+// __type precisa bater exatamente com o nome do shape modelado pela AWS
+// (ex.: botocore/data/sqs/2012-11-05/service-2.json define o shape
+// "QueueDoesNotExist" sem sufixo) — um "Exception" extra faz o SDK
+// oficial nunca casar com a exceção tipada.
 func TestEncodeJSONError_Format(t *testing.T) {
 	var buf strings.Builder
-	if err := EncodeSQSJSONError(&buf, "QueueAlreadyExists", "queue exists"); err != nil {
+	if err := EncodeSQSJSONError(&buf, "QueueNameExists", "queue exists"); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, `"__type":"QueueAlreadyExistsException"`) {
+	if !strings.Contains(out, `"__type":"QueueNameExists"`) {
 		t.Errorf("__type format errado: %s", out)
 	}
 	if !strings.Contains(out, `"message":"queue exists"`) {

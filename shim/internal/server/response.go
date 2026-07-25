@@ -198,10 +198,16 @@ func writeQueryErrorEnvelope(w http.ResponseWriter, code, message,
 //
 // Format:
 //
-//	{"__type":"<Code>Exception","message":"<Message>"}
+//	{"__type":"<Code>","message":"<Message>"}
+//
+// __type precisa ser o nome exato do shape modelado pela AWS (ex.:
+// "QueueDoesNotExist", sem sufixo "Exception"). botocore faz match exato
+// via error_shape.error_code; um sufixo extra faz o SDK oficial nunca
+// bater com a exceção tipada (client.exceptions.QueueDoesNotExist) e
+// cair sempre em ClientError genérico.
 func encodeJSONError(w http.ResponseWriter, code, message string) error {
 	resp := map[string]string{
-		"__type":  code + "Exception",
+		"__type":  code,
 		"message": message,
 	}
 	return json.NewEncoder(w).Encode(resp)

@@ -12,6 +12,15 @@ import (
 
 // requestIDMiddleware extrai X-Request-ID do request (se houver) ou
 // gera um novo. Injeta em context e response header.
+//
+// Seta DOIS headers com o mesmo valor:
+//   - X-Request-ID: nosso header custom (debug/tooling interno).
+//   - x-amzn-RequestId: o header que SDKs AWS oficiais realmente leem.
+//     botocore (_inject_response_metadata em parsers.py, tanto no path
+//     JSON quanto no de erro) só popula response['ResponseMetadata']
+//     ['RequestId'] a partir deste header — sem ele, todo client oficial
+//     usando o protocolo JSON (default do aws-sdk-js v3 para SQS, por
+//     exemplo) nunca recebe o RequestId de volta.
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
@@ -19,8 +28,8 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
+		w.Header().Set("x-amzn-RequestId", id)
 		ctx := withRequestID(r.Context(), id)
-		_ = ctx
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -98,7 +98,7 @@ func TestWriteSQSFatalError(t *testing.T) {
 		code   string
 		status int
 	}{
-		{"QueueAlreadyExists", 400},    // sender
+		{"QueueNameExists", 400},       // sender
 		{"QueueDoesNotExist", 400},     // sender
 		{"InvalidParameterValue", 400}, // sender
 		{"MissingParameter", 400},      // sender
@@ -175,6 +175,26 @@ func TestRequestIDMiddleware_PreservesIncoming(t *testing.T) {
 
 	if got := rec.Header().Get("X-Request-ID"); got != "my-trace-123" {
 		t.Errorf("X-Request-ID preserved: got %q", got)
+	}
+}
+
+// TestRequestIDMiddleware_SetsAmznHeader garante que o header que SDKs
+// AWS oficiais realmente leem (x-amzn-RequestId) está presente e igual
+// ao X-Request-ID — botocore só popula ResponseMetadata.RequestId a
+// partir deste header (parsers.py: _inject_response_metadata).
+func TestRequestIDMiddleware_SetsAmznHeader(t *testing.T) {
+	s := New(":0", &Handlers{Storage: nil}, 5242880)
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	s.router.ServeHTTP(rec, req)
+
+	amzn := rec.Header().Get("x-amzn-RequestId")
+	if amzn == "" {
+		t.Fatal("x-amzn-RequestId deve estar presente (é o header que botocore lê)")
+	}
+	if amzn != rec.Header().Get("X-Request-ID") {
+		t.Errorf("x-amzn-RequestId (%q) deve bater com X-Request-ID (%q)",
+			amzn, rec.Header().Get("X-Request-ID"))
 	}
 }
 

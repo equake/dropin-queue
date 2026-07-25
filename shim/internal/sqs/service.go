@@ -39,7 +39,7 @@ type AWSError = awserr.Error
 // pacote sqs por motivos de organização e para evitar import cycle;
 // awserr exporta as constantes equivalentes (Code sem prefixo).
 const (
-	ErrCodeQueueAlreadyExists       = awserr.CodeQueueAlreadyExists
+	ErrCodeQueueNameExists          = awserr.CodeQueueNameExists
 	ErrCodeQueueDoesNotExist        = "QueueDoesNotExist"
 	ErrCodeInvalidParameterValue    = awserr.CodeInvalidParameterValue
 	ErrCodeMissingParameter         = awserr.CodeMissingParameter
@@ -50,8 +50,12 @@ const (
 	ErrCodeReceiptHandleIsInvalid   = awserr.CodeReceiptHandleIsInvalid
 	ErrCodePurgeQueueInProgress     = "PurgeQueueInProgress"
 	ErrCodeBatchEntryIdsNotDistinct = "BatchEntryIdsNotDistinct"
-	ErrCodeTooManyEntriesInBatch    = "TooManyEntriesInBatch"
-	ErrCodeEmptyBatchRequest        = "EmptyBatchRequest"
+	// ErrCodeTooManyEntriesInBatch: nome exato do shape AWS é
+	// "TooManyEntriesInBatchRequest" (confirmado no service-2.json do
+	// botocore) — sem o sufixo "Request", o SDK oficial nunca reconhece
+	// o erro tipado.
+	ErrCodeTooManyEntriesInBatch = "TooManyEntriesInBatchRequest"
+	ErrCodeEmptyBatchRequest     = "EmptyBatchRequest"
 )
 
 func init() {
@@ -64,7 +68,7 @@ func init() {
 	// sender fault. Idempotente (RegisterSenderFaults pode ser chamado
 	// múltiplas vezes).
 	awserr.RegisterSenderFaults(
-		ErrCodeQueueAlreadyExists,
+		ErrCodeQueueNameExists,
 		ErrCodeQueueDoesNotExist,
 		ErrCodePurgeQueueInProgress,
 		ErrCodeBatchEntryIdsNotDistinct,
@@ -153,7 +157,7 @@ func (CreateQueueResult) actionResultTag() string { return "" } // handled by en
 //
 // Comportamento AWS:
 //   - Se fila existe com mesmos atributos → idempotente, devolve a URL.
-//   - Se fila existe com atributos diferentes → QueueAlreadyExists.
+//   - Se fila existe com atributos diferentes → QueueNameExists.
 //   - Atributos não fornecidos → defaults SQS.
 //
 // Validações:
