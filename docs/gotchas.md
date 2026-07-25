@@ -226,6 +226,6 @@
 
 ## Convenções de código
 
-17. **Commits em português, mensagens detalhadas** descrevendo o porquê da mudança.
+29. **Commits em português, mensagens detalhadas** descrevendo o porquê da mudança.
     Um commit por mudança lógica. Squash só quando a IA fizer mudanças múltiplas
     numa única rodada.

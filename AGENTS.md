@@ -41,11 +41,14 @@
 ## 2. Comandos essenciais
 
 ```bash
-make up              # sobe NATS + MinIO + dropin-server
+make up              # sobe NATS + MinIO + dropin-server (backend nats, default)
+make up-postgres     # sobe Postgres + dropin-server (backend postgres, porta 4567)
 make build           # compila shim/bin/dropin-server
-make test            # roda testes Go (com -race)
-make test-int        # roda pytest contra shim rodando
-make down            # derruba stack
+make test            # roda testes Go (com -race; testes do adapter Postgres
+                      # pulam sem GQ_TEST_POSTGRES_DSN)
+make test-int        # roda pytest contra shim rodando (backend nats)
+make test-int-postgres  # MESMA suíte pytest, backend postgres
+make down            # derruba stack (os dois backends)
 make logs-shim       # tail logs do shim (JSON estruturado)
 ```
 
@@ -79,7 +82,9 @@ Stack:
 
 - [ ] `make test` passa (testes Go com race detector)
 - [ ] Teste E2E adicionado em `shim/test/integration/` para a nova funcionalidade
-- [ ] `make test-int` passa (70/70 mínimo; deve crescer a cada feature) — atualmente **72/72** pós-refactor/kiss-dry-pass-1
+- [ ] `make test-int` **e** `make test-int-postgres` passam (72/72 em cada,
+      mesma suíte contra os dois backends — mudança em `storage/nats/` ou
+      `storage/postgres/` que só roda uma das duas não está pronta)
 - [ ] README atualizado: tabela de compatibilidade + seção "Funcionalidades" + comando quickstart se aplicável
 - [ ] Commit em português, mensagem detalhada descrevendo o **porquê** (não só o quê)
 - [ ] `git push origin main` e atualize descrição do repo se a feature mudar o escopo

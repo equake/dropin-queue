@@ -4,6 +4,12 @@
 > Para o status atual (o que já está pronto e testado), ver a seção
 > [Compatibilidade AWS — Status atual](../README.md#compatibilidade-aws--status-atual)
 > no README.
+>
+> O que segue abaixo é 100% no nível de protocolo AWS (SQS/SNS) — vale
+> igualmente para os dois backends de mensageria (`GQ_BACKEND=nats` ou
+> `postgres`), que têm paridade funcional completa e passam a mesma
+> suíte E2E. Ver [`docs/architecture.md`](architecture.md#backend-postgres)
+> para detalhes específicos de cada backend.
 
 Status legend:
 - ✅ implementado e testado E2E
@@ -145,7 +151,9 @@ Cobertura por operação + protocolo. Validadas por
 - [ ] Sharding para multi-consumer Standard (atualmente: 1 consumer durável/fila)
 - [ ] Round-robin assignment entre consumers
 - [ ] Multi-region replication (active-active ou active-passive)
-- [ ] Connection pooling para o NATS broker (atualmente: 1 conn por dropin-server)
+- [ ] Connection pooling para o broker NATS (atualmente: 1 conn por
+      dropin-server; **não se aplica ao backend Postgres**, que já usa
+      `pgxpool` configurável via `GQ_POSTGRES_MAX_CONNS`)
 - [ ] Sharded message processing para batch operations grandes
 
 ---

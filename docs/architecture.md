@@ -1,8 +1,11 @@
 # Arquitetura do dropin-queue
 
 Este documento descreve a arquitetura do `dropin-queue`, um clone
-auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go
-sobre NATS JetStream.
+auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go.
+O backend de mensageria é trocável via config (`GQ_BACKEND=nats|postgres`,
+nunca os dois ao mesmo tempo) — NATS JetStream é o default histórico do
+projeto; Postgres (`LISTEN/NOTIFY` + `SKIP LOCKED`) é a alternativa,
+detalhada em [Backend Postgres](#backend-postgres) mais abaixo.
 
 > Status: Fase 4 completa — 13 SQS + 9 SNS operações funcionais (72/72 testes E2E passando)
 > (CreateQueue/Get/List/Delete + SendMessage/ReceiveMessage/DeleteMessage/
@@ -58,6 +61,12 @@ sobre NATS JetStream.
 │  Usado para File Storage do JetStream (snapshots + chunks)    │
 └───────────────────────────────────────────────────────────────┘
 ```
+
+> Diagrama acima mostra o backend `nats` (default). Com
+> `GQ_BACKEND=postgres`, as duas últimas caixas (JetStream cluster +
+> Object Storage) são substituídas por um único Postgres — sem cluster
+> Raft nem snapshot em object storage; ver
+> [Backend Postgres](#backend-postgres).
 
 ## Camadas do shim
 

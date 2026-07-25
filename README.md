@@ -110,8 +110,10 @@ make test-int-postgres   # roda a MESMA suíte E2E (72 testes) contra ele
   HTTP/HTTPS ficam pending)
 
 **Cobertura de testes:** 72/72 passando (12 SQS smoke + 15 SQS messages +
-18 SQS batch + 7 SQS limits + 20 SNS) em ~50s contra shim rodando em
-docker-compose com NATS JetStream 2.14 + MinIO.
+18 SQS batch + 7 SQS limits + 20 SNS) — mesma suíte, rodada contra os
+**dois backends**: `make test-int` (NATS JetStream 2.14 + MinIO, ~40s) e
+`make test-int-postgres` (Postgres 16, ~5s), sem nenhuma diferença nos
+arquivos de teste.
 
 ### Funcionalidades SQS implementadas
 
@@ -304,7 +306,9 @@ Lista completa em `dropin-server --help` (`GQ_ACCOUNT_ID`, `GQ_REGION`,
 └─────────────────────────────────────────────┘
 ```
 
-Detalhes em [`docs/architecture.md`](docs/architecture.md).
+Diagrama acima é o backend `nats` (default). Com `GQ_BACKEND=postgres`,
+o cluster NATS + object storage viram um único Postgres. Detalhes e
+mapeamento completo em [`docs/architecture.md`](docs/architecture.md#backend-postgres).
 
 ---
 
