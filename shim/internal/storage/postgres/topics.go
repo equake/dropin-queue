@@ -114,9 +114,10 @@ func (c *Client) Subscribe(ctx context.Context, sub types.Subscription) (result 
 	if sub.ARN == "" {
 		sub.ARN = generateSubscriptionARN(sub.TopicARN, sub.Protocol, sub.Endpoint)
 	}
-	if sub.Protocol == "http" || sub.Protocol == "https" {
+	switch sub.Protocol {
+	case "http", "https":
 		sub.Pending = true
-	} else if sub.Protocol == "sqs" {
+	case "sqs":
 		sub.Pending = false
 	}
 

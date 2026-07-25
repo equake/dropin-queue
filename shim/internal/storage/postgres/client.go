@@ -137,7 +137,7 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("postgres listen connect: %w", err)
 	}
 	if _, err := listenConn.Exec(ctx, "LISTEN "+notifyChannel); err != nil {
-		listenConn.Close(ctx)
+		_ = listenConn.Close(ctx)
 		pool.Close()
 		return nil, fmt.Errorf("listen: %w", err)
 	}
@@ -203,10 +203,10 @@ func (c *Client) Ping(ctx context.Context) error {
 func (c *Client) Close() error {
 	c.cancelListen()
 	<-c.listenDone
-	c.listenConn.Close(context.Background())
+	err := c.listenConn.Close(context.Background())
 	c.pool.Close()
 	observability.L().Info("conexão Postgres fechada")
-	return nil
+	return err
 }
 
 // cachedQueue devolve o queueIdent cacheado, se houver.

@@ -29,7 +29,11 @@ func testClient(t *testing.T) *Client {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	t.Cleanup(func() { c.Close() })
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	})
 	return c
 }
 
