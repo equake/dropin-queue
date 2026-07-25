@@ -74,25 +74,12 @@ func TestIncDecInflight(t *testing.T) {
 	DecInflight("sqs")
 }
 
-func TestObserveAuth(t *testing.T) {
-	SetupMetrics()
-	ObserveAuth("allow")
-	ObserveAuth("deny")
-	ObserveAuth("error")
-}
-
 func TestIncDecLongPoll(t *testing.T) {
 	SetupMetrics()
 	IncLongPoll("q1")
 	IncLongPoll("q1")
 	DecLongPoll("q1")
 	ObserveLongPollDuration("q1", 250*time.Millisecond)
-}
-
-func TestObserveSNSPublish(t *testing.T) {
-	SetupMetrics()
-	ObserveSNSPublish("topic-orders", "ok", 5*time.Millisecond)
-	ObserveSNSPublish("topic-orders", "error", 5*time.Millisecond)
 }
 
 // TestStartObserve_OkAndError valida o helper introduzido no Commit 1

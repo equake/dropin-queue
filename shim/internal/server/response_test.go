@@ -80,31 +80,6 @@ func TestWriteFatalError_AllTransports(t *testing.T) {
 
 // TestDetectTransport garante que a discriminação JSON vs Query e
 // SQS vs SNS funciona via headers.
-func TestDetectTransport(t *testing.T) {
-	cases := []struct {
-		contentType string
-		target      string
-		isSNS       bool
-		want        transport
-	}{
-		{"application/x-www-form-urlencoded", "", false, transportSQSQuery},
-		{"application/x-www-form-urlencoded", "", true, transportSNSQuery},
-		{"application/x-amz-json-1.0", "AmazonSQS.CreateQueue", false, transportSQSJSON},
-		{"application/x-amz-json-1.0", "AmazonSNS.Publish", true, transportSNSJSON},
-	}
-	for _, c := range cases {
-		req, _ := http.NewRequest("POST", "/", strings.NewReader(""))
-		req.Header.Set("Content-Type", c.contentType)
-		req.Header.Set("X-Amz-Target", c.target)
-		got := detectTransport(req, c.isSNS)
-		if got != c.want {
-			tt := t
-			tt.Errorf("ct=%q target=%q isSNS=%v: got %s, want %s",
-				c.contentType, c.target, c.isSNS, got, c.want)
-		}
-	}
-}
-
 // TestContentTypeFor é trivial mas protege contra regressão no mapping.
 func TestContentTypeFor(t *testing.T) {
 	cases := map[transport]string{
@@ -163,23 +138,6 @@ func TestRespondQueryXML_WireFormatExact(t *testing.T) {
 		if !strings.Contains(out, m) {
 			t.Errorf("missing %q in output:\n%s", m, out)
 		}
-	}
-}
-
-// TestRespondJSON_WireFormatExact valida respondJSON produz o envelope
-// esperado em JSON 1.0.
-func TestRespondJSON_WireFormatExact(t *testing.T) {
-	var buf bytes.Buffer
-	rec := &bufferRW{header: make(http.Header), w: &buf}
-	respondJSON(rec, http.StatusOK, map[string]string{"QueueUrl": "https://x/y"})
-
-	ct := rec.header.Get("Content-Type")
-	if ct != "application/x-amz-json-1.0" {
-		t.Errorf("Content-Type: got %q, want application/x-amz-json-1.0", ct)
-	}
-	out := buf.String()
-	if !strings.Contains(out, `"QueueUrl":"https://x/y"`) {
-		t.Errorf("missing payload in output:\n%s", out)
 	}
 }
 

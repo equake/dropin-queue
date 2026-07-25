@@ -46,13 +46,37 @@ const (
 	LogLevelError LogLevel = "error"
 )
 
+// Backend define qual broker de mensageria o shim usa. Trocável via config
+// (GQ_BACKEND) — nunca simultâneo. A camada storage.Storage é a mesma
+// interface para os dois; só o pacote de wiring em cmd/dropin-server muda
+// qual adapter constrói.
+type Backend string
+
+const (
+	// BackendNATS usa NATS JetStream (streams + KV). Default — mesmo
+	// comportamento de antes deste campo existir.
+	BackendNATS Backend = "nats"
+
+	// BackendPostgres usa Postgres (tabelas + LISTEN/NOTIFY + SKIP LOCKED).
+	// Opção de menor custo operacional para quem já roda Postgres; não
+	// escala escrita horizontalmente como o cluster NATS (ver
+	// docs/architecture.md).
+	BackendPostgres Backend = "postgres"
+)
+
 // Config é a configuração completa do dropin-queue shim.
 type Config struct {
 	// Endereço HTTP que o shim escuta (host:porta). Default: :4566 (mesmo que LocalStack).
 	Addr string
 
+	// Backend seleciona o broker de mensageria: nats (default) ou postgres.
+	// Chaveado via GQ_BACKEND — nunca os dois ao mesmo tempo. A camada
+	// storage.Storage é idêntica para ambos; só cmd/dropin-server decide
+	// qual adapter construir.
+	Backend Backend
+
 	// NATSURL é a URL de conexão com o broker NATS JetStream.
-	// Suporta tls:// para mTLS.
+	// Suporta tls:// para mTLS. Usado só quando Backend == nats.
 	NATSURL string
 
 	// NATSCredentialsFile é o caminho do arquivo .creds do NATS para autenticação.
@@ -61,6 +85,25 @@ type Config struct {
 
 	// NATSCACert é o CA para verificar o certificado TLS do broker.
 	NATSCACert string
+
+	// PostgresDSN é a connection string do Postgres (postgres://user:pass@host:5432/db).
+	// Usado só quando Backend == postgres.
+	PostgresDSN string
+
+	// PostgresMaxConns é o tamanho máximo do pool de conexões (pgxpool),
+	// sem contar a conexão dedicada de LISTEN. Se 0, assume 20.
+	PostgresMaxConns int
+
+	// PostgresPollInterval é o intervalo do poll de segurança do long-poll
+	// (rede de segurança contra NOTIFY perdido — ver docs/architecture.md).
+	// Se 0, assume 300ms.
+	PostgresPollInterval time.Duration
+
+	// PostgresNotifyCoalesce é o intervalo mínimo entre NOTIFYs emitidos
+	// para a mesma fila. Evita 1 pg_notify() por SendMessage sob alto
+	// throughput (trigger por INSERT limita a poucos milhares de writes/s).
+	// Se 0, assume 20ms.
+	PostgresNotifyCoalesce time.Duration
 
 	// AccountID é o account ID default (12 dígitos) que o shim usa
 	// quando não há IAM store configurado.
@@ -113,18 +156,22 @@ type Config struct {
 // Default retorna configuração default segura para dev.
 func Default() Config {
 	return Config{
-		Addr:                ":4566",
-		NATSURL:             "nats://localhost:4222",
-		AccountID:           "000000000000",
-		Region:              "us-east-1",
-		AuthMode:            AuthModeOff,
-		LogLevel:            LogLevelInfo,
-		MetricsAddr:         "",
-		ShutdownTimeout:     30 * time.Second,
-		MaxRequestBodyBytes: 5 << 20, // 5 MB; cobre SQS+SNS no pior caso
-		StreamReplicas:      1,       // dev; produção seta 3 explicitamente
-		MaxAckPending:       1000,
-		TopicMaxAge:         time.Hour,
+		Addr:                   ":4566",
+		Backend:                BackendNATS,
+		NATSURL:                "nats://localhost:4222",
+		PostgresMaxConns:       20,
+		PostgresPollInterval:   300 * time.Millisecond,
+		PostgresNotifyCoalesce: 20 * time.Millisecond,
+		AccountID:              "000000000000",
+		Region:                 "us-east-1",
+		AuthMode:               AuthModeOff,
+		LogLevel:               LogLevelInfo,
+		MetricsAddr:            "",
+		ShutdownTimeout:        30 * time.Second,
+		MaxRequestBodyBytes:    5 << 20, // 5 MB; cobre SQS+SNS no pior caso
+		StreamReplicas:         1,       // dev; produção seta 3 explicitamente
+		MaxAckPending:          1000,
+		TopicMaxAge:            time.Hour,
 	}
 }
 
@@ -138,9 +185,14 @@ func Load(args []string) (Config, error) {
 	fs.SetOutput(os.Stderr)
 
 	fs.StringVar(&cfg.Addr, "addr", envOr("GQ_ADDR", cfg.Addr), "Endereço HTTP (host:porta)")
+	fs.StringVar((*string)(&cfg.Backend), "backend", envOr("GQ_BACKEND", string(cfg.Backend)), "Backend de mensageria: nats|postgres")
 	fs.StringVar(&cfg.NATSURL, "nats-url", envOr("GQ_NATS_URL", cfg.NATSURL), "URL do broker NATS JetStream (nats:// ou tls://)")
 	fs.StringVar(&cfg.NATSCredentialsFile, "nats-creds", envOr("GQ_NATS_CREDS", ""), "Arquivo .creds NATS para autenticação")
 	fs.StringVar(&cfg.NATSCACert, "nats-ca-cert", envOr("GQ_NATS_CA_CERT", ""), "Certificado CA para validar TLS do broker")
+	fs.StringVar(&cfg.PostgresDSN, "postgres-dsn", envOr("GQ_POSTGRES_DSN", ""), "Connection string Postgres (postgres://user:pass@host:5432/db)")
+	fs.IntVar(&cfg.PostgresMaxConns, "postgres-max-conns", envIntOr("GQ_POSTGRES_MAX_CONNS", cfg.PostgresMaxConns), "Máximo de conexões no pool Postgres")
+	fs.DurationVar(&cfg.PostgresPollInterval, "postgres-poll-interval", envDurationOr("GQ_POSTGRES_POLL_INTERVAL", cfg.PostgresPollInterval), "Poll de segurança do long-poll (fallback do NOTIFY)")
+	fs.DurationVar(&cfg.PostgresNotifyCoalesce, "postgres-notify-coalesce", envDurationOr("GQ_POSTGRES_NOTIFY_COALESCE", cfg.PostgresNotifyCoalesce), "Intervalo mínimo entre NOTIFYs da mesma fila")
 	fs.StringVar(&cfg.AccountID, "account-id", envOr("GQ_ACCOUNT_ID", cfg.AccountID), "Account ID default (12 dígitos)")
 	fs.StringVar(&cfg.Region, "region", envOr("GQ_REGION", cfg.Region), "Região AWS default")
 	fs.StringVar((*string)(&cfg.AuthMode), "auth-mode", envOr("GQ_AUTH_MODE", string(cfg.AuthMode)), "Modo de auth: off|verify|strict")
@@ -169,8 +221,36 @@ func (c Config) Validate() error {
 	if c.Addr == "" {
 		errs = append(errs, "addr não pode ser vazio")
 	}
-	if c.NATSURL == "" {
-		errs = append(errs, "nats-url não pode ser vazio")
+	switch c.Backend {
+	case BackendNATS:
+		if c.NATSURL == "" {
+			errs = append(errs, "nats-url não pode ser vazio")
+		}
+		switch c.StreamReplicas {
+		case 1, 3, 5:
+			// ok — Raft exige quórum ímpar
+		default:
+			errs = append(errs, fmt.Sprintf("stream-replicas deve ser 1, 3 ou 5, recebido %d", c.StreamReplicas))
+		}
+		if c.IsProduction() && c.StreamReplicas == 1 {
+			// Fail-loud: produção com 1 réplica = perda de dados na queda de 1 nó.
+			errs = append(errs, "auth-mode verify/strict exige stream-replicas >= 3 (HA); use GQ_STREAM_REPLICAS=3")
+		}
+	case BackendPostgres:
+		if c.PostgresDSN == "" {
+			errs = append(errs, "postgres-dsn não pode ser vazio quando backend=postgres")
+		}
+		if c.PostgresMaxConns < 1 {
+			errs = append(errs, "postgres-max-conns deve ser >= 1")
+		}
+		if c.PostgresPollInterval <= 0 {
+			errs = append(errs, "postgres-poll-interval deve ser positivo")
+		}
+		if c.PostgresNotifyCoalesce < 0 {
+			errs = append(errs, "postgres-notify-coalesce não pode ser negativo")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("backend inválido: %q (esperado nats|postgres)", c.Backend))
 	}
 	if c.AccountID != "" && !isValidAccountID(c.AccountID) {
 		errs = append(errs, fmt.Sprintf("account-id deve ter 12 dígitos, recebido %q", c.AccountID))
@@ -196,21 +276,11 @@ func (c Config) Validate() error {
 	if c.MaxRequestBodyBytes < 1024 {
 		errs = append(errs, "max-body-bytes deve ser >= 1024")
 	}
-	switch c.StreamReplicas {
-	case 1, 3, 5:
-		// ok — Raft exige quórum ímpar
-	default:
-		errs = append(errs, fmt.Sprintf("stream-replicas deve ser 1, 3 ou 5, recebido %d", c.StreamReplicas))
-	}
 	if c.MaxAckPending < 1 {
 		errs = append(errs, "max-ack-pending deve ser >= 1")
 	}
 	if c.TopicMaxAge <= 0 {
 		errs = append(errs, "topic-max-age deve ser positivo")
-	}
-	if c.IsProduction() && c.StreamReplicas == 1 {
-		// Fail-loud: produção com 1 réplica = perda de dados na queda de 1 nó.
-		errs = append(errs, "auth-mode verify/strict exige stream-replicas >= 3 (HA); use GQ_STREAM_REPLICAS=3")
 	}
 
 	if len(errs) > 0 {

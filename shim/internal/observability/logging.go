@@ -11,12 +11,10 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/equake/dropin-queue/shim/internal/config"
 )
@@ -130,11 +128,4 @@ func SetupTracing(ctx context.Context, cfg config.Config, w io.Writer) (func(con
 	otel.SetTracerProvider(tp)
 
 	return tp.Shutdown, nil
-}
-
-// StartSpan é um helper que inicia um span nomeado e devolve o contexto
-// enriquecido + função para finalizar. Loga erro se houver.
-func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	tracer := otel.Tracer("dropin-queue")
-	return tracer.Start(ctx, name, trace.WithAttributes(attrs...))
 }

@@ -20,6 +20,8 @@ from botocore.exceptions import ClientError
 import uuid
 import subprocess
 
+from conftest import SHIM_ENDPOINT
+
 
 @pytest.fixture
 def clean_topic(sns_client):
@@ -53,7 +55,7 @@ def test_sns_publish_query_normal_size_routes_to_sns_handler(sns_client,
          "-H", "Content-Type: application/x-www-form-urlencoded",
          "-d", form,
          "-w", "\nHTTP_STATUS=%{http_code}",
-         "http://localhost:4566/"],
+         f"{SHIM_ENDPOINT}/"],
         capture_output=True, text=True
     )
     assert "HTTP_STATUS=200" in r.stdout, f"publish falhou: {r.stdout}"
@@ -84,7 +86,7 @@ def test_sns_publish_query_oversize_rejected_with_coherent_error(sns_client,
          "-H", "Content-Type: application/x-www-form-urlencoded",
          "--data-binary", "@-",
          "-w", "\nHTTP_STATUS=%{http_code}",
-         "http://localhost:4566/"],
+         f"{SHIM_ENDPOINT}/"],
         input=form, capture_output=True, text=True
     )
     stdout = r.stdout

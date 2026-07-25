@@ -534,14 +534,15 @@ const maxFanoutConcurrency = 16
 // SQS: chama SendMessage no storage para a queue destino (síncrono).
 // HTTP/HTTPS: POST com retry exponencial.
 func (c *Client) deliverToSubscription(ctx context.Context, topic *types.Topic, sub *types.Subscription, msg *types.Message) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("publish_deliver", nil, time.Since(start)) }()
+	var err error
+	defer observability.StartObserve("publish_deliver").Done(&err)
 
 	switch sub.Protocol {
 	case "sqs":
 		// SQS endpoint é "arn:aws:sqs:..." ou "http(s)://..."
 		queueName := protocol.QueueNameFromURL(sub.Endpoint)
 		if queueName == "" {
+			err = storage.ErrInvalidArgument("SQS subscription com endpoint inválido")
 			observability.L().Warn("SQS subscription com endpoint inválido", "endpoint", sub.Endpoint)
 			return
 		}
@@ -549,8 +550,9 @@ func (c *Client) deliverToSubscription(ctx context.Context, topic *types.Topic, 
 			Body:              msg.Body,
 			MessageAttributes: msg.MessageAttributes,
 		}
-		_, err := c.SendMessage(ctx, queueName, delivery)
-		if err != nil {
+		_, serr := c.SendMessage(ctx, queueName, delivery)
+		if serr != nil {
+			err = serr
 			observability.L().Warn("fan-out SQS failed",
 				"sub_arn", sub.ARN, "queue", queueName, "err", err.Error())
 			return

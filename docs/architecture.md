@@ -1,16 +1,20 @@
 # Arquitetura do dropin-queue
 
 Este documento descreve a arquitetura do `dropin-queue`, um clone
-auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go
-sobre NATS JetStream.
+auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go.
+O backend de mensageria é trocável via config (`GQ_BACKEND=nats|postgres`,
+nunca os dois ao mesmo tempo) — NATS JetStream é o default histórico do
+projeto; Postgres (`LISTEN/NOTIFY` + `SKIP LOCKED`) é a alternativa,
+detalhada em [Backend Postgres](#backend-postgres) mais abaixo.
 
-> Status: Fase 4 completa — 13 SQS + 9 SNS operações funcionais (65/65 testes E2E passando)
+> Status: Fase 4 completa — 13 SQS + 9 SNS operações funcionais (72/72 testes E2E passando)
 > (CreateQueue/Get/List/Delete + SendMessage/ReceiveMessage/DeleteMessage/
 > ChangeMessageVisibility/PurgeQueue + SetQueueAttributes + SendMessageBatch/
 > DeleteMessageBatch), todas com dual protocol (Query+JSON), todas com
-> testes E2E (45/45 passando) via boto3 oficial Python.
+> testes E2E via boto3 oficial Python.
 > Inclui FIFO queues completas: MessageGroupId, MessageDeduplicationId,
 > ContentBasedDeduplication, SequenceNumber, ordering within group.
+> Backend de mensageria trocável (NATS JetStream ou Postgres) via GQ_BACKEND.
 
 ## Visão geral
 
@@ -28,12 +32,12 @@ sobre NATS JetStream.
 │  ├─────────────────────────────────────────────────────────┤  │
 │  │  protocol/ SQS Query (form+XML) · SQS JSON 1.0         │  │
 │  ├─────────────────────────────────────────────────────────┤  │
-│  │  awssig/    [Semana 4] verificação de AWS Signature v4 │  │
+│  │  awssig/    (Fase 5) verificação de AWS Signature v4   │  │
 │  ├─────────────────────────────────────────────────────────┤  │
-│  │  iam/       [Semana 4] policy evaluation (JSON IAM)    │  │
+│  │  iam/       (Fase 5) policy evaluation (JSON IAM)      │  │
 │  ├─────────────────────────────────────────────────────────┤  │
 │  │  sqs/       validação semântica + tradução erros       │  │
-│  │  sns/       [Semana 4] fan-out · filter policy         │  │
+│  │  sns/       fan-out · filter policy                    │  │
 │  ├─────────────────────────────────────────────────────────┤  │
 │  │  storage/   interface pluggable (broker-agnostic)      │  │
 │  ├─────────────────────────────────────────────────────────┤  │
@@ -57,6 +61,12 @@ sobre NATS JetStream.
 │  Usado para File Storage do JetStream (snapshots + chunks)    │
 └───────────────────────────────────────────────────────────────┘
 ```
+
+> Diagrama acima mostra o backend `nats` (default). Com
+> `GQ_BACKEND=postgres`, as duas últimas caixas (JetStream cluster +
+> Object Storage) são substituídas por um único Postgres — sem cluster
+> Raft nem snapshot em object storage; ver
+> [Backend Postgres](#backend-postgres).
 
 ## Camadas do shim
 
@@ -136,15 +146,15 @@ FIFO queues (Fase 3):
 
 - MessageGroupId particiona subject NATS (`q.<queue>.<groupId>`) →
   ordering within group preservado nativamente
-- MessageDeduplicationId via Nats-Msg-Id (dedup explícito em janela de 2min)
+- MessageDeduplicationId via Nats-Msg-Id (dedup explícito em janela de 5min)
 - ContentBasedDeduplication via SHA-256(body) como Nats-Msg-Id
-  (dedup implícito em janela de 2min)
+  (dedup implícito em janela de 5min)
 - SequenceNumber retornado em cada send (MessageId = stream sequence)
 
-### 5. `sns/` — SNS service [Semana 4]
+### 5. `sns/` — SNS service
 
-Stub atual. Implementará fan-out com filter policy em subscribers SQS
-e HTTP/HTTPS.
+Fan-out com filter policy em subscribers SQS (completo). HTTP/HTTPS
+ficam pending — `ConfirmSubscription` é stub (`UnsupportedOperation`).
 
 ### 6. `storage/` — broker abstraction
 
@@ -158,6 +168,13 @@ type Storage interface {
     Close() error
 }
 ```
+
+Nenhum tipo do broker vaza por essa interface — `sqs/`, `sns/`, `protocol/`
+e `server/` só conhecem `storage.Storage` e `pkg/types`. Isso é o que torna
+o backend trocável via `config.Backend` (`GQ_BACKEND=nats|postgres`, nunca
+os dois ao mesmo tempo): trocar de adapter é uma mudança contida em
+`cmd/dropin-server/main.go` (qual `Connect()` chamar) — zero mudança nas
+camadas acima.
 
 #### Adapter NATS JetStream (`storage/nats/`)
 
@@ -182,19 +199,125 @@ Por que KV separado para atributos:
 - Streams JetStream são para mensagens; metadata é orthogonal
 - Permite evoluir schema sem migração de streams
 
+#### Adapter Postgres (`storage/postgres/`) {#backend-postgres}
+
+Opção de backend para quem já opera Postgres em produção e quer evitar
+rodar um segundo sistema de mensageria. Habilitado via `GQ_BACKEND=postgres`
++ `GQ_POSTGRES_DSN`. Schema aplicado idempotente (`CREATE TABLE IF NOT
+EXISTS`) no `Connect()` — sem ferramenta de migration externa no MVP.
+
+Mapeamento:
+
+| Conceito AWS              | Implementação Postgres                                    |
+|----------------------------|------------------------------------------------------------|
+| Fila SQS                  | Linha em `queues`                                          |
+| Mensagem                  | Linha em `messages` (`queue_id`, `group_key`, `body`, `message_attributes` JSONB) |
+| MessageGroupId (FIFO)      | Coluna `group_key` — preserva ordem relativa via `ORDER BY id` no claim |
+| MessageDeduplicationId /   | Tabela `message_dedup` (`queue_id`, `dedup_id`) com `UNIQUE` + janela de 5min |
+| ContentBasedDeduplication  | (SHA-256 do body quando não há ID explícito, igual ao adapter NATS)      |
+| Visibility timeout         | Coluna `visible_at` + `claim_token` (UUID)                   |
+| Claim de mensagens         | `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` |
+| Long-polling               | `LISTEN/NOTIFY` (canal único `dropin_queue_msg`, payload = nome da fila) + poll de segurança |
+| Tópico SNS                 | Linha em `topics` — **sem log de mensagens publicadas** (ver nota abaixo) |
+| Subscription                | Linha em `subscriptions` (`topic_arn` persistido verbatim — storage não conhece account/region) |
+
+**Divergência conhecida: histórico de publish do tópico.** O adapter NATS
+mantém um stream JetStream por tópico (`topic-<nome>`, retenção
+`GQ_TOPIC_MAX_AGE`, default 1h) onde toda mensagem publicada fica
+registrada, independente do fan-out. O adapter Postgres **não tem
+equivalente** — `Publish` só faz fan-out síncrono, nada é persistido a
+mais no tópico em si. Decisão consciente, não lacuna a preencher por
+padrão: hoje **nenhum dos dois backends tem qualquer consumidor desse
+histórico** (o próprio comentário do `Publish` no adapter NATS já registra
+isso como "disponível para... **futuro**"), então implementar o
+equivalente no Postgres seria complexidade sem uso corrente. Fica
+documentado aqui para não ser redescoberto como bug: se um dia alguém
+implementar consumo do histórico de tópico (replay, auditoria, etc.), os
+dois backends precisam ganhar essa capacidade juntos, não só um.
+
+Receipt handle: `pg1:<message_id>:<claim_token>` — stateless, igual ao
+`rh2:` do adapter NATS (ack/nak funciona de qualquer réplica do shim, sem
+sticky session).
+
+**Claim de mensagens (`SKIP LOCKED`).** `ReceiveMessage` usa uma única
+query (Standard e FIFO, sem distinção — ver próximo parágrafo):
+
+```sql
+WITH claimed AS (
+    UPDATE messages SET
+        visible_at   = now() + make_interval(secs => $3),
+        delivery_count = delivery_count + 1,
+        claim_token = gen_random_uuid()
+    WHERE id IN (
+        SELECT id FROM messages
+        WHERE queue_id = $1 AND visible_at <= now()
+        ORDER BY id
+        FOR UPDATE SKIP LOCKED
+        LIMIT $2
+    )
+    RETURNING id, body, message_attributes, enqueued_at, delivery_count, claim_token::text
+)
+SELECT * FROM claimed ORDER BY id;
+```
+
+O `ORDER BY id` externo (sobre a CTE, não sobre a subquery) é essencial:
+`UPDATE ... RETURNING` não herda a ordem da subquery de seleção — o
+resultado pode sair em ordem física do heap, que o MVCC embaralha a cada
+UPDATE. Sem o `ORDER BY` externo, ordering-within-group do FIFO quebra de
+forma intermitente sob concorrência (bug real, encontrado nos testes E2E
+durante o desenvolvimento — ver `docs/gotchas.md`).
+
+**FIFO não usa mutex de grupo.** Uma iteração inicial do design chegou a
+usar uma tabela `queue_groups` com `FOR UPDATE SKIP LOCKED` para impor "no
+máximo 1 mensagem in-flight por `MessageGroupId`" (o comportamento real do
+SQS FIFO). Essa restrição foi removida porque quebrava paridade com o
+adapter NATS: o adapter NATS **também não impõe** esse limite hoje (o
+consumer durável compartilhado distribui livremente entre pulls
+concorrentes) — só garante ordem relativa via log order. Manter o mutex no
+Postgres teria deixado os dois backends com semânticas de FIFO
+diferentes, quebrando o requisito de "mesma suíte E2E passa nos dois".
+Ordering-within-group nos dois backends hoje = ordem relativa preservada,
+**não** exclusividade de entrega. Fica documentado aqui como um item de
+paridade a revisitar junto (nos dois backends) se o projeto precisar da
+garantia real do SQS FIFO no futuro.
+
+**Long-polling: NOTIFY com poll de segurança, não 1 conexão por request.**
+Uma única conexão dedicada de `LISTEN` por réplica do shim recebe
+notificações no canal fixo `dropin_queue_msg` (payload = nome da fila) e
+multiplexa para os `ReceiveMessage` em espera via canais Go em memória.
+`SendMessage` não dispara `NOTIFY` síncrono por mensagem — um debounce
+leading-edge (`GQ_POSTGRES_NOTIFY_COALESCE`, default 20ms) evita o teto de
+throughput que um `NOTIFY` por `INSERT` causaria (o artigo que motivou este
+design, [dbos.dev](https://www.dbos.dev/blog/postgres-listen-notify-scalability),
+mediu 2.9K writes/s com notificação por linha vs. 60K writes/s
+bufferizando). Um poll de segurança (`GQ_POSTGRES_POLL_INTERVAL`, default
+300ms) cobre o caso raro de notificação perdida (reconexão do listener,
+etc.) — o mesmo padrão de rede de segurança que o artigo descreve.
+
+**Trade-off de escala (avaliar antes de produção).** Postgres LISTEN/NOTIFY
++ `SKIP LOCKED` é uma opção legítima de baixo custo para volume
+moderado/alto, mas a história de escala horizontal é estruturalmente
+diferente da do cluster NATS JetStream (Raft, múltiplos nós ativos): em
+Postgres, escrita é sempre single-writer (primary). O backend Postgres
+provavelmente serve bem até um teto de throughput de escrita bem definido
+por instância, mas não escala escrita horizontalmente como o cluster NATS
+— é uma troca de "menor custo/operação mais simples" por "teto de
+throughput mais baixo e HA dependente de failover do Postgres
+(Patroni/RDS Multi-AZ/etc.), não de Raft nativo".
+
 ### 7. `observability/` — telemetria
 
 - **Logging**: slog JSON em prod, text colorido em dev
 - **Métricas**: Prometheus (shim_http_*, shim_storage_*, shim_sqs_*,
   shim_sns_*)
-- **Tracing**: OTel SDK com stdout exporter em dev (OTLP em prod [Semana 6])
+- **Tracing**: OTel SDK com stdout exporter em dev (OTLP em prod — roadmap)
 
-### 8. `awssig/` — SigV4 [Semana 4]
+### 8. `awssig/` — SigV4 (Fase 5 — planejado)
 
 Verificação de AWS Signature v4. Em modo dev (`AUTH_MODE=off`),
 qualquer credencial é aceita.
 
-### 9. `iam/` — IAM [Semana 4]
+### 9. `iam/` — IAM (Fase 5 — planejado)
 
 Avaliação de policy JSON (subset IAM). Suporta Action, Resource,
 Effect, Condition básico.
@@ -325,7 +448,7 @@ Mapeamentos críticos:
 - [x] Validações: Message vazio, Message > 256 KiB, TopicArn inválido
 - [x] Suporte a MessageAttributes (String/Number/Binary) + Subject
 - [x] Dual protocol: Query (form+XML) e JSON 1.0 simultaneamente
-- [x] 20 testes E2E com boto3 — 65/65 totais passando
+- [x] 20 testes E2E com boto3 — 72/72 totais passando
 
 ### Fase 5 — Auth + IAM real
 
@@ -352,7 +475,8 @@ Mapeamentos críticos:
 ### Conhecidas (aceitas para MVP)
 
 - **Não SigV4 nem IAM** — qualquer credencial aceita (AUTH_MODE=off)
-- **Não suporta SNS** — stub retorna UnsupportedOperation
+- **SNS: subscriptions HTTP/HTTPS ficam pending** — `ConfirmSubscription`
+  é stub (`UnsupportedOperation`); protocol `sqs` está completo
 - **Não tem cluster** — NATS single-node em dev
 - **Não tem observability de produção** — só stdout/log
 - **Não tem TLS** — HTTP plano, TLS termina no LB em prod

@@ -170,3 +170,53 @@ func TestValidate_StreamReplicasOddQuorum(t *testing.T) {
 		}
 	}
 }
+
+func TestValidate_PostgresBackendRequiresDSN(t *testing.T) {
+	c := Default()
+	c.Backend = BackendPostgres
+	if err := c.Validate(); err == nil {
+		t.Fatal("backend=postgres sem postgres-dsn deve ser rejeitado")
+	}
+
+	c.PostgresDSN = "postgres://user:pass@localhost:5432/dropin"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("backend=postgres com dsn válido deve passar: %v", err)
+	}
+}
+
+func TestValidate_PostgresBackendIgnoresNATSAndReplicaChecks(t *testing.T) {
+	// Trocar para postgres não deve exigir nats-url nem stream-replicas
+	// ímpar — essas são invariantes só do backend NATS.
+	c := Default()
+	c.Backend = BackendPostgres
+	c.PostgresDSN = "postgres://user:pass@localhost:5432/dropin"
+	c.NATSURL = ""
+	c.StreamReplicas = 0
+	if err := c.Validate(); err != nil {
+		t.Fatalf("backend=postgres não deve validar campos do NATS: %v", err)
+	}
+}
+
+func TestValidate_InvalidBackend(t *testing.T) {
+	c := Default()
+	c.Backend = "kafka"
+	if err := c.Validate(); err == nil {
+		t.Fatal("esperava erro com backend inválido")
+	}
+}
+
+func TestLoad_BackendFlag(t *testing.T) {
+	t.Setenv("GQ_BACKEND", "")
+	t.Setenv("GQ_POSTGRES_DSN", "")
+
+	c, err := Load([]string{"dropin-queue", "--backend=postgres", "--postgres-dsn=postgres://u:p@localhost/db"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Backend != BackendPostgres {
+		t.Errorf("Backend: got %s", c.Backend)
+	}
+	if c.PostgresDSN != "postgres://u:p@localhost/db" {
+		t.Errorf("PostgresDSN: got %s", c.PostgresDSN)
+	}
+}

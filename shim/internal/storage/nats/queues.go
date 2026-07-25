@@ -18,6 +18,15 @@ import (
 // então este limite só é atingido se consumers pararem de consumir.
 const defaultMaxMsgsPerQueue = 10_000_000
 
+// dedupWindow é a janela de deduplicação FIFO (Nats-Msg-Id) — mesmo valor
+// e mesmo nome de const que storage/postgres/messages.go, para os dois
+// backends convergirem no valor real da spec SQS FIFO (5min). Sem setar
+// isso, o campo Duplicates do StreamConfig fica zero e o JetStream usa
+// seu próprio default de 2min — divergência real encontrada em revisão:
+// uma msg reenviada entre 2 e 5min do original não seria deduplicada no
+// NATS mas seria no Postgres (e no SQS real).
+const dedupWindow = 5 * time.Minute
+
 // streamCfg converte uma Queue em configuração JetStream.
 //
 // Mapeamentos:
@@ -55,6 +64,14 @@ func (c *Client) streamCfg(q types.Queue) jetstream.StreamConfig {
 		cfg.MaxAge = time.Duration(q.Attributes.MessageRetentionPeriod) * time.Second
 	} else {
 		cfg.MaxAge = 4 * 24 * time.Hour // SQS default 4 dias
+	}
+
+	// Duplicates não pode exceder MaxAge (rejeitado pelo nats-server) —
+	// SQS aceita retenção a partir de 60s, bem abaixo dos 5min de
+	// dedupWindow, então o cap é necessário para filas de retenção curta.
+	cfg.Duplicates = dedupWindow
+	if cfg.Duplicates > cfg.MaxAge {
+		cfg.Duplicates = cfg.MaxAge
 	}
 
 	return cfg

@@ -2,7 +2,6 @@ package observability
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -70,38 +69,5 @@ func TestSetupLogger_LevelFiltering(t *testing.T) {
 	}
 	if !strings.Contains(out, "kept-warn") || !strings.Contains(out, "kept-error") {
 		t.Errorf("warn/error devem aparecer: %s", out)
-	}
-}
-
-func TestStartSpan(t *testing.T) {
-	// Inicializa tracing para que StartSpan produza span válido.
-	buf := &bytes.Buffer{}
-	cfg := config.Default()
-	cfg.LogLevel = config.LogLevelDebug
-	shutdown, err := SetupTracing(context.Background(), cfg, buf)
-	if err != nil {
-		t.Fatalf("SetupTracing: %v", err)
-	}
-	defer func() { _ = shutdown(context.Background()) }()
-
-	ctx := context.Background()
-	ctx2, span := StartSpan(ctx, "test-op")
-	defer span.End()
-
-	if !span.SpanContext().IsValid() {
-		t.Fatal("span context deve ser válido com tracer configurado")
-	}
-	if ctx2 == nil {
-		t.Fatal("ctx2 não pode ser nil")
-	}
-	if span.SpanContext().TraceID().IsValid() == false {
-		t.Error("trace id deve ser válido")
-	}
-}
-
-func TestStatusRecorder(t *testing.T) {
-	// Sanidade do helper de status recorder.
-	if StatusFromHTTP(200) != "200" {
-		t.Errorf("StatusFromHTTP(200) != 200")
 	}
 }

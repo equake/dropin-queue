@@ -1,15 +1,17 @@
 # Makefile do dropin-queue
 #
 # Targets principais:
-#   make help       - lista todos os targets
-#   make up         - sobe docker-compose (stack dev)
-#   make down       - derruba docker-compose
-#   make build      - builda o dropin-server
-#   make test       - roda testes Go
-#   make test-int   - roda testes de integração (boto3 contra shim rodando)
-#   make smoke      - roda smoke test rápido
-#   make lint       - roda golangci-lint
-#   make fmt        - formata código Go
+#   make help              - lista todos os targets
+#   make up                - sobe docker-compose (stack dev, backend NATS)
+#   make up-postgres       - sobe docker-compose (stack dev, backend Postgres)
+#   make down              - derruba docker-compose (todos os profiles)
+#   make build             - builda o dropin-server
+#   make test              - roda testes Go (adapter Postgres pula sem GQ_TEST_POSTGRES_DSN)
+#   make test-int          - roda testes de integração (boto3 contra shim, backend NATS)
+#   make test-int-postgres - roda a MESMA suíte de integração, backend Postgres
+#   make smoke             - roda smoke test rápido
+#   make lint              - roda golangci-lint
+#   make fmt               - formata código Go
 
 SHELL := /bin/bash
 
@@ -87,7 +89,7 @@ test-coverage: ## Roda testes com cobertura
 	cd $(SHIM_DIR) && $(GO_BIN) tool cover -func=coverage.out | tail -20
 
 .PHONY: test-int
-test-int: up ## Roda testes de integração (boto3 contra shim)
+test-int: up ## Roda testes de integração (boto3 contra shim, backend NATS)
 	@echo "Aguardando shim ficar pronto..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		if curl -sf http://localhost:4566/healthz > /dev/null 2>&1; then \
@@ -96,6 +98,17 @@ test-int: up ## Roda testes de integração (boto3 contra shim)
 		sleep 1; \
 	done
 	$(PYTEST) -v shim/test/integration/
+
+.PHONY: test-int-postgres
+test-int-postgres: up-postgres ## Roda a MESMA suíte de integração contra o backend Postgres
+	@echo "Aguardando shim-postgres ficar pronto..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if curl -sf http://localhost:4567/healthz > /dev/null 2>&1; then \
+			echo "shim-postgres pronto"; break; \
+		fi; \
+		sleep 1; \
+	done
+	SHIM_ENDPOINT=http://localhost:4567 $(PYTEST) -v shim/test/integration/
 
 .PHONY: smoke
 smoke: up ## Roda apenas o smoke test rápido
@@ -111,21 +124,29 @@ smoke: up ## Roda apenas o smoke test rápido
 # --- Docker Compose ---
 
 .PHONY: up
-up: build ## Sobe stack dev (NATS + MinIO + shim)
-	docker compose -f $(COMPOSE_FILE) up -d
-	@echo "$(GREEN)✓$(RESET) stack dev rodando"
+up: build ## Sobe stack dev (NATS + MinIO + shim) — backend NATS
+	docker compose -f $(COMPOSE_FILE) up -d --build
+	@echo "$(GREEN)✓$(RESET) stack dev rodando (backend NATS)"
 	@echo ""
 	@echo "  shim:     http://localhost:4566"
 	@echo "  nats:     nats://localhost:4222"
 	@echo "  minio:    http://localhost:9000 (admin/minioadmin)"
 
+.PHONY: up-postgres
+up-postgres: build ## Sobe stack dev com backend Postgres (profile "postgres")
+	docker compose -f $(COMPOSE_FILE) --profile postgres up -d --build
+	@echo "$(GREEN)✓$(RESET) stack dev rodando (backend Postgres)"
+	@echo ""
+	@echo "  shim-postgres: http://localhost:4567"
+	@echo "  postgres:      postgres://dropin:dropin@localhost:5432/dropin"
+
 .PHONY: down
-down: ## Derruba stack dev
-	docker compose -f $(COMPOSE_FILE) down
+down: ## Derruba stack dev (todos os profiles, inclusive postgres)
+	docker compose -f $(COMPOSE_FILE) --profile postgres down
 
 .PHONY: down-v
-down-v: ## Derruba stack dev e remove volumes
-	docker compose -f $(COMPOSE_FILE) down -v
+down-v: ## Derruba stack dev e remove volumes (todos os profiles)
+	docker compose -f $(COMPOSE_FILE) --profile postgres down -v
 
 .PHONY: restart
 restart: down up ## Reinicia stack dev

@@ -1,11 +1,19 @@
 # dropin-queue
 
-> **Drop-in replacement AWS SQS/SNS over NATS JetStream**
+> **Drop-in replacement AWS SQS/SNS — backend de mensageria trocável (NATS JetStream ou Postgres)**
 
 `dropin-queue` oferece uma API HTTP que fala os mesmos protocolos (`Query` e `JSON`) e devolve
 as mesmas respostas que os serviços gerenciados da AWS. Você aponta qualquer cliente oficial
 (`boto3`, `aws-sdk-go-v2`, `aws-sdk-js`, `aws-sdk-java`, `aws-cli`, SDK da sua linguagem favorita)
 para o endpoint do shim e tudo funciona como antes — sem precisar de uma conta AWS.
+
+A camada de mensageria por baixo é **trocável via config** (`GQ_BACKEND=nats|postgres`,
+nunca os dois ao mesmo tempo) — a API HTTP, o wire format AWS e a lógica de negócio SQS/SNS
+são idênticos nos dois casos; só o adapter de storage muda. Ver
+[`docs/architecture.md`](docs/architecture.md#backend-postgres) para o mapeamento completo e
+os trade-offs de cada backend.
+
+### Backend NATS JetStream (default)
 
 A camada de mensageria por baixo é o **NATS JetStream**, que entrega:
 
@@ -26,6 +34,25 @@ A camada de API é um **shim em Go** (`dropin-server`) que implementa:
 - Fan-out SNS para subscribers SQS/HTTP/HTTPS com filter policy
 - mTLS entre shim e broker
 - Métricas Prometheus, logs JSON estruturados, tracing OpenTelemetry
+
+### Backend Postgres (alternativo)
+
+Para quem já opera Postgres em produção e quer evitar operar um segundo
+sistema de mensageria, `GQ_BACKEND=postgres` troca o NATS JetStream por
+tabelas relacionais + `LISTEN/NOTIFY` + `SELECT ... FOR UPDATE SKIP LOCKED`:
+
+- `SKIP LOCKED` para claim de mensagens sem duplicidade sob concorrência
+- Long-polling via `LISTEN/NOTIFY` (canal único, sem 1 conexão por
+  long-poll) com poll de segurança contra notificação perdida
+- FIFO (`MessageGroupId`, `MessageDeduplicationId`,
+  `ContentBasedDeduplication`) com paridade funcional completa com o NATS
+- Custo/operação menor para volume moderado; ver ressalva de escala em
+  [`docs/architecture.md`](docs/architecture.md#backend-postgres)
+
+```bash
+make up-postgres         # sobe Postgres 16 + shim (porta 4567)
+make test-int-postgres   # roda a MESMA suíte E2E (72 testes) contra ele
+```
 
 ---
 
@@ -83,8 +110,10 @@ A camada de API é um **shim em Go** (`dropin-server`) que implementa:
   HTTP/HTTPS ficam pending)
 
 **Cobertura de testes:** 72/72 passando (12 SQS smoke + 15 SQS messages +
-18 SQS batch + 7 SQS limits + 20 SNS) em ~50s contra shim rodando em
-docker-compose com NATS JetStream 2.14 + MinIO.
+18 SQS batch + 7 SQS limits + 20 SNS) — mesma suíte, rodada contra os
+**dois backends**: `make test-int` (NATS JetStream 2.14 + MinIO, ~40s) e
+`make test-int-postgres` (Postgres 16, ~5s), sem nenhuma diferença nos
+arquivos de teste.
 
 ### Funcionalidades SQS implementadas
 
@@ -172,10 +201,11 @@ make up
 make smoke
 
 # Você deve ver:
-# test/integration/test_sqs_smoke.py::test_create_queue PASSED
-# test/integration/test_sqs_messages.py::test_send_and_receive_single PASSED
-# test/integration/test_sqs_messages.py::test_delete_message PASSED
-# ... 65 passed in ~60s
+# test/integration/test_sqs_smoke.py::test_healthz PASSED
+# test/integration/test_sqs_smoke.py::test_readyz PASSED
+# test/integration/test_sqs_smoke.py::test_create_queue_returns_aws_format_url PASSED
+# ... 12 passed in poucos segundos (make smoke roda só test_sqs_smoke.py;
+# use make test-int para a suíte completa — 72 passed in ~40s)
 
 # Inspecionar logs do shim
 make logs-shim
@@ -218,13 +248,28 @@ aws --endpoint-url http://localhost:4566 \
 | Env var (`GQ_*`)      | Flag                 | Default   | Descrição |
 |-----------------------|----------------------|-----------|-----------|
 | `GQ_ADDR`             | `--addr`             | `:4566`   | Endereço HTTP |
-| `GQ_NATS_URL`         | `--nats-url`         | `nats://localhost:4222` | Broker (suporta `tls://`) |
+| `GQ_BACKEND`          | `--backend`          | `nats`    | `nats\|postgres` — nunca os dois ao mesmo tempo |
 | `GQ_AUTH_MODE`        | `--auth-mode`        | `off`     | `off\|verify\|strict` |
+| `GQ_MAX_BODY_BYTES`   | `--max-body-bytes`   | `262144`  | Tamanho máx de request body |
+| `GQ_SHUTDOWN_TIMEOUT` | `--shutdown-timeout` | `30s`     | Shutdown gracioso |
+
+**Backend `nats`:**
+
+| Env var (`GQ_*`)      | Flag                 | Default   | Descrição |
+|-----------------------|----------------------|-----------|-----------|
+| `GQ_NATS_URL`         | `--nats-url`         | `nats://localhost:4222` | Broker (suporta `tls://`) |
 | `GQ_STREAM_REPLICAS`  | `--stream-replicas`  | `1`       | Réplicas Raft por stream (1/3/5). **Produção = 3**; `verify`/`strict` com 1 réplica é rejeitado |
 | `GQ_MAX_ACK_PENDING`  | `--max-ack-pending`  | `1000`    | Máx mensagens in-flight por fila |
 | `GQ_TOPIC_MAX_AGE`    | `--topic-max-age`    | `1h`      | Retenção do stream de arquivo dos tópicos SNS |
-| `GQ_MAX_BODY_BYTES`   | `--max-body-bytes`   | `262144`  | Tamanho máx de request body |
-| `GQ_SHUTDOWN_TIMEOUT` | `--shutdown-timeout` | `30s`     | Shutdown gracioso |
+
+**Backend `postgres`:**
+
+| Env var (`GQ_*`)              | Flag                        | Default | Descrição |
+|--------------------------------|-----------------------------|---------|-----------|
+| `GQ_POSTGRES_DSN`              | `--postgres-dsn`            | (obrigatório) | `postgres://user:pass@host:5432/db` |
+| `GQ_POSTGRES_MAX_CONNS`        | `--postgres-max-conns`      | `20`    | Tamanho do pool de conexões |
+| `GQ_POSTGRES_POLL_INTERVAL`    | `--postgres-poll-interval`  | `300ms` | Poll de segurança do long-poll (fallback do NOTIFY) |
+| `GQ_POSTGRES_NOTIFY_COALESCE`  | `--postgres-notify-coalesce`| `20ms`  | Intervalo mínimo entre NOTIFYs da mesma fila |
 
 Lista completa em `dropin-server --help` (`GQ_ACCOUNT_ID`, `GQ_REGION`,
 `GQ_LOG_LEVEL`, `GQ_METRICS_ADDR`, `GQ_NATS_CREDS`, `GQ_NATS_CA_CERT`).
@@ -261,7 +306,9 @@ Lista completa em `dropin-server --help` (`GQ_ACCOUNT_ID`, `GQ_REGION`,
 └─────────────────────────────────────────────┘
 ```
 
-Detalhes em [`docs/architecture.md`](docs/architecture.md).
+Diagrama acima é o backend `nats` (default). Com `GQ_BACKEND=postgres`,
+o cluster NATS + object storage viram um único Postgres. Detalhes e
+mapeamento completo em [`docs/architecture.md`](docs/architecture.md#backend-postgres).
 
 ---
 
@@ -288,11 +335,13 @@ dropin-queue/
 
 ```bash
 make help              # lista todos os targets
-make up                # sobe docker-compose
-make down              # derruba docker-compose
+make up                # sobe docker-compose (backend NATS)
+make up-postgres        # sobe docker-compose (backend Postgres, profile "postgres")
+make down              # derruba docker-compose (todos os backends)
 make build             # builda dropin-server
-make test              # roda testes Go
-make test-int          # roda testes de integração (boto3 + shim rodando)
+make test              # roda testes Go (adapter Postgres pula sem GQ_TEST_POSTGRES_DSN)
+make test-int          # roda testes de integração contra o backend NATS
+make test-int-postgres  # roda a MESMA suíte de integração contra o backend Postgres
 make smoke             # roda o smoke test rápido
 make lint              # roda golangci-lint
 make fmt               # formata código Go
@@ -309,15 +358,19 @@ Cada pacote em `shim/internal/` é isolado e testável:
 - `sqs/` — implementação das operações SQS
 - `sns/` — implementação das operações SNS
 - `iam/` — avaliação de policy JSON
-- `storage/` — interface + adapter NATS JetStream
+- `storage/` — interface + adapters (`storage/nats/` e `storage/postgres/`, trocáveis via `GQ_BACKEND`)
 - `server/` — HTTP router + middleware
 - `observability/` — métricas, tracing, logging
 - `config/` — carregamento de configuração
 
 ### Testes
 
-- **Unitários**: `go test ./shim/...` (não precisam de infra)
-- **Integração**: `make test-int` (sobe docker-compose, roda pytest contra boto3)
+- **Unitários**: `go test ./shim/...` (não precisam de infra; os testes do
+  adapter `storage/postgres` pulam automaticamente sem `GQ_TEST_POSTGRES_DSN`)
+- **Integração — backend NATS**: `make test-int` (sobe docker-compose, roda pytest contra boto3)
+- **Integração — backend Postgres**: `make test-int-postgres` (mesma suíte
+  pytest, zero mudança nos arquivos de teste — eles falam HTTP/boto3, não
+  sabem qual backend está por trás)
 - **E2E contra ambiente real**: planejado para a Fase 6 (Terraform) —
   o target `make test-e2e` ainda não existe
 
@@ -325,7 +378,7 @@ Cada pacote em `shim/internal/` é isolado e testável:
 
 ## Compatibilidade AWS — Status atual
 
-Esta seção reflete o que está **implementado e testado E2E** (65/65 testes passando).
+Esta seção reflete o que está **implementado e testado E2E** (72/72 testes passando).
 Tabela detalhada com cobertura por protocolo também está no topo do README.
 Acompanhe o progresso futuro em [`docs/api-compatibility.md`](docs/api-compatibility.md).
 

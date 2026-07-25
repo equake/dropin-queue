@@ -20,6 +20,26 @@ jobs:
   test-go:
     name: Testes Go (unitários)
     runs-on: ubuntu-latest
+    # Postgres real para os testes de integração do adapter storage/postgres
+    # (postgres_test.go) — sem isso eles pulam silenciosamente (t.Skip sem
+    # GQ_TEST_POSTGRES_DSN) e o CI nunca exercita TestConcurrentReceiveNever
+    # DoubleDelivers/TestLongPollWakesUpOnNotify/etc.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dropin
+          POSTGRES_PASSWORD: dropin
+          POSTGRES_DB: dropin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dropin -d dropin"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GQ_TEST_POSTGRES_DSN: postgres://dropin:dropin@localhost:5432/dropin?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,7 +78,7 @@ jobs:
         working-directory: shim
         run: go build -trimpath -o /tmp/dropin-server ./cmd/dropin-server
 
-      - name: Test (com race detector)
+      - name: Test (com race detector, backend NATS + Postgres)
         working-directory: shim
         run: go test -race -coverprofile=coverage.out ./...
 
@@ -68,9 +88,9 @@ jobs:
         run: |
           go tool cover -func=coverage.out | tail -20
 
-  # --- Testes de Integração (boto3 contra shim em docker-compose) ---
+  # --- Testes de Integração (boto3 contra shim em docker-compose, NATS) ---
   test-integration:
-    name: Testes Integração (boto3)
+    name: Testes Integração (boto3, NATS)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -80,12 +100,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
 
       - name: Instalar dependências Python
         run: |
@@ -117,6 +131,56 @@ jobs:
       - name: Derrubar stack
         if: always()
         run: docker compose down -v
+
+  # --- Testes de Integração (boto3 contra shim em docker-compose, Postgres) ---
+  #
+  # Roda a MESMA suíte pytest do job acima, sem nenhuma mudança nos testes,
+  # contra o backend Postgres (profile "postgres", shim-postgres na porta
+  # 4567). Antes desta seção, o backend Postgres nunca era exercitado em
+  # CI — só localmente — e podia regredir silenciosamente (ver docs/
+  # gotchas.md).
+  test-integration-postgres:
+    name: Testes Integração (boto3, Postgres)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar dependências Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3 pytest requests
+
+      - name: Subir docker-compose (profile postgres)
+        run: |
+          docker compose --profile postgres up -d --build
+          # Aguarda healthcheck do shim-postgres
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4567/readyz > /dev/null 2>&1; then
+              echo "shim-postgres pronto"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Rodar suíte de integração
+        run: |
+          SHIM_ENDPOINT=http://localhost:4567 pytest shim/test/integration/ -v
+
+      - name: Mostrar logs (em caso de falha)
+        if: failure()
+        run: |
+          docker compose logs postgres | tail -50
+          docker compose logs shim-postgres | tail -50
+
+      - name: Derrubar stack
+        if: always()
+        run: docker compose --profile postgres down -v
 
   # --- Lint (golangci-lint) ---
   lint:

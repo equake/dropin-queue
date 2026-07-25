@@ -1,7 +1,8 @@
 // Command dropin-server é o entrypoint do clone auto-hospedável de AWS SNS/SQS.
 //
-// dropin-server faz parse da configuração, conecta ao broker NATS JetStream,
-// inicia o servidor HTTP e gerencia shutdown gracioso.
+// dropin-server faz parse da configuração, conecta ao broker (NATS
+// JetStream ou Postgres, conforme GQ_BACKEND), inicia o servidor HTTP e
+// gerencia shutdown gracioso.
 //
 // Uso:
 //
@@ -9,15 +10,24 @@
 //
 // Variáveis de ambiente equivalentes a flags (precedência flag > env > default):
 //
-//	GQ_ADDR, GQ_NATS_URL, GQ_NATS_CREDS, GQ_NATS_CA_CERT,
-//	GQ_ACCOUNT_ID, GQ_REGION, GQ_AUTH_MODE, GQ_LOG_LEVEL,
+//	GQ_ADDR, GQ_BACKEND, GQ_ACCOUNT_ID, GQ_REGION, GQ_AUTH_MODE, GQ_LOG_LEVEL,
 //	GQ_METRICS_ADDR, GQ_SHUTDOWN_TIMEOUT, GQ_MAX_BODY_BYTES,
+//
+//	# backend=nats
+//	GQ_NATS_URL, GQ_NATS_CREDS, GQ_NATS_CA_CERT,
 //	GQ_STREAM_REPLICAS, GQ_MAX_ACK_PENDING, GQ_TOPIC_MAX_AGE
+//
+//	# backend=postgres
+//	GQ_POSTGRES_DSN, GQ_POSTGRES_MAX_CONNS, GQ_POSTGRES_POLL_INTERVAL,
+//	GQ_POSTGRES_NOTIFY_COALESCE
 //
 // Exemplos:
 //
-//	# dev local (sem TLS, AUTH_MODE=off)
-//	dropin-server --addr=:4566 --nats-url=nats://localhost:4222
+//	# dev local, backend NATS (sem TLS, AUTH_MODE=off)
+//	dropin-server --addr=:4566 --backend=nats --nats-url=nats://localhost:4222
+//
+//	# dev local, backend Postgres
+//	dropin-server --addr=:4566 --backend=postgres --postgres-dsn=postgres://user:pass@localhost:5432/dropin
 //
 //	# produção (TLS + IAM strict)
 //	dropin-server --addr=:4566 \
@@ -41,7 +51,9 @@ import (
 	"github.com/equake/dropin-queue/shim/internal/server"
 	"github.com/equake/dropin-queue/shim/internal/sns"
 	"github.com/equake/dropin-queue/shim/internal/sqs"
+	"github.com/equake/dropin-queue/shim/internal/storage"
 	natsstorage "github.com/equake/dropin-queue/shim/internal/storage/nats"
+	pgstorage "github.com/equake/dropin-queue/shim/internal/storage/postgres"
 )
 
 func main() {
@@ -62,7 +74,7 @@ func run() error {
 	logger := observability.SetupLogger(cfg)
 	logger.Info("dropin-server iniciando",
 		"addr", cfg.Addr,
-		"nats_url", cfg.NATSURL,
+		"backend", string(cfg.Backend),
 		"account_id", cfg.AccountID,
 		"region", cfg.Region,
 		"auth_mode", string(cfg.AuthMode),
@@ -78,42 +90,56 @@ func run() error {
 		traceShutdown = func(context.Context) error { return nil }
 	}
 
-	// 5. Storage (broker)
+	// 5. Storage (broker) — trocável via cfg.Backend (GQ_BACKEND). Os dois
+	// adapters satisfazem a mesma interface storage.Storage; nada abaixo
+	// deste ponto sabe qual foi escolhido.
 	connectCtx, connectCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer connectCancel()
 
-	prefix := ""
-	if cfg.IsProduction() {
-		// Em prod, usar prefix garante isolamento por tenant/ambiente.
-		prefix = fmt.Sprintf("%s-%s", cfg.AccountID, cfg.Region)
+	var store storage.Storage
+	switch cfg.Backend {
+	case config.BackendPostgres:
+		store, err = pgstorage.Connect(connectCtx, pgstorage.Options{
+			DSN:            cfg.PostgresDSN,
+			MaxConns:       int32(cfg.PostgresMaxConns),
+			PollInterval:   cfg.PostgresPollInterval,
+			NotifyCoalesce: cfg.PostgresNotifyCoalesce,
+		})
+	case config.BackendNATS:
+		prefix := ""
+		if cfg.IsProduction() {
+			// Em prod, usar prefix garante isolamento por tenant/ambiente.
+			prefix = fmt.Sprintf("%s-%s", cfg.AccountID, cfg.Region)
+		}
+		store, err = natsstorage.Connect(connectCtx, natsstorage.Options{
+			URL:             cfg.NATSURL,
+			CredentialsFile: cfg.NATSCredentialsFile,
+			CACert:          cfg.NATSCACert,
+			Name:            "dropin-queue",
+			Prefix:          prefix,
+			StreamReplicas:  cfg.StreamReplicas,
+			MaxAckPending:   cfg.MaxAckPending,
+			TopicMaxAge:     cfg.TopicMaxAge,
+		})
+	default:
+		return fmt.Errorf("backend desconhecido: %q", cfg.Backend)
 	}
-
-	storage, err := natsstorage.Connect(connectCtx, natsstorage.Options{
-		URL:             cfg.NATSURL,
-		CredentialsFile: cfg.NATSCredentialsFile,
-		CACert:          cfg.NATSCACert,
-		Name:            "dropin-queue",
-		Prefix:          prefix,
-		StreamReplicas:  cfg.StreamReplicas,
-		MaxAckPending:   cfg.MaxAckPending,
-		TopicMaxAge:     cfg.TopicMaxAge,
-	})
 	if err != nil {
 		return fmt.Errorf("connect storage: %w", err)
 	}
 	defer func() {
-		if err := storage.Close(); err != nil {
+		if err := store.Close(); err != nil {
 			logger.Warn("close storage", "err", err.Error())
 		}
 	}()
 
 	// 6. Services
-	sqsService := sqs.New(storage, cfg.AccountID, cfg.Region, endpointFromAddr(cfg.Addr))
-	snsService := sns.New(storage, cfg.AccountID, cfg.Region, endpointFromAddr(cfg.Addr))
+	sqsService := sqs.New(store, cfg.AccountID, cfg.Region, endpointFromAddr(cfg.Addr))
+	snsService := sns.New(store, cfg.AccountID, cfg.Region, endpointFromAddr(cfg.Addr))
 
 	// 7. HTTP server
 	srv := server.New(cfg.Addr, &server.Handlers{
-		Storage: storage,
+		Storage: store,
 		SQS:     sqsService,
 		SNS:     snsService,
 	}, cfg.MaxRequestBodyBytes)
@@ -124,7 +150,7 @@ func run() error {
 		serverErr <- srv.ListenAndServe()
 	}()
 
-	// Aguita sinal ou erro do servidor.
+	// Aguarda sinal ou erro do servidor.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 

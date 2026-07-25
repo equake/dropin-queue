@@ -41,19 +41,22 @@
 ## 2. Comandos essenciais
 
 ```bash
-make up              # sobe NATS + MinIO + dropin-server
+make up              # sobe NATS + MinIO + dropin-server (backend nats, default)
+make up-postgres     # sobe Postgres + dropin-server (backend postgres, porta 4567)
 make build           # compila shim/bin/dropin-server
-make test            # roda testes Go (com -race)
-make test-int        # roda pytest contra shim rodando
-make down            # derruba stack
+make test            # roda testes Go (com -race; testes do adapter Postgres
+                      # pulam sem GQ_TEST_POSTGRES_DSN)
+make test-int        # roda pytest contra shim rodando (backend nats)
+make test-int-postgres  # MESMA suíte pytest, backend postgres
+make down            # derruba stack (os dois backends)
 make logs-shim       # tail logs do shim (JSON estruturado)
 ```
 
 Stack:
-- Go 1.25 (em `/home/seiwa/go/bin/go`)
+- Go 1.26 (em `/home/seiwa/go/bin/go`)
 - Python 3.12 + boto3 1.43 + pytest 9 (em `/home/seiwa/venv`)
 - Docker Compose v2
-- NATS JetStream 2.10, MinIO latest
+- NATS JetStream 2.14, MinIO latest, Postgres 16 (backend alternativo)
 
 ---
 
@@ -64,8 +67,14 @@ Stack:
 - `docs/gotchas.md` — **LEIA ANTES DE IMPLEMENTAR** — bugs que já nos custaram tempo
 - `shim/internal/protocol/` — parsers/serializers AWS (referência para dual protocol)
 - `shim/internal/storage/nats/` — adapter NATS JetStream (referência para KV + streams)
+- `shim/internal/storage/postgres/` — adapter Postgres (LISTEN/NOTIFY + SKIP LOCKED),
+  trocável via `GQ_BACKEND`; ver `docs/architecture.md#backend-postgres`
 - `shim/internal/awserr/` — type AWSError compartilhado entre SQS e SNS; sender-fault registry
-- `shim/test/integration/` — testes E2E boto3 (referência para uso correto da API)
+- `shim/test/integration/` — testes E2E boto3 (referência para uso correto da API).
+  Rodam contra os dois backends sem mudança (`make test-int` / `make test-int-postgres`) —
+  **nunca hardcode `http://localhost:4566` em teste novo**, use a fixture
+  `sqs_client`/`sns_client` de `conftest.py` ou importe `SHIM_ENDPOINT` de lá
+  (ver gotcha #22 em `docs/gotchas.md`)
 
 ---
 
@@ -73,7 +82,9 @@ Stack:
 
 - [ ] `make test` passa (testes Go com race detector)
 - [ ] Teste E2E adicionado em `shim/test/integration/` para a nova funcionalidade
-- [ ] `make test-int` passa (70/70 mínimo; deve crescer a cada feature) — atualmente **72/72** pós-refactor/kiss-dry-pass-1
+- [ ] `make test-int` **e** `make test-int-postgres` passam (72/72 em cada,
+      mesma suíte contra os dois backends — mudança em `storage/nats/` ou
+      `storage/postgres/` que só roda uma das duas não está pronta)
 - [ ] README atualizado: tabela de compatibilidade + seção "Funcionalidades" + comando quickstart se aplicável
 - [ ] Commit em português, mensagem detalhada descrevendo o **porquê** (não só o quê)
 - [ ] `git push origin main` e atualize descrição do repo se a feature mudar o escopo
