@@ -150,7 +150,7 @@ func run() error {
 		serverErr <- srv.ListenAndServe()
 	}()
 
-	// Aguita sinal ou erro do servidor.
+	// Aguarda sinal ou erro do servidor.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 

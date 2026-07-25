@@ -199,10 +199,11 @@ make up
 make smoke
 
 # Você deve ver:
-# test/integration/test_sqs_smoke.py::test_create_queue PASSED
-# test/integration/test_sqs_messages.py::test_send_and_receive_single PASSED
-# test/integration/test_sqs_messages.py::test_delete_message PASSED
-# ... 65 passed in ~60s
+# test/integration/test_sqs_smoke.py::test_healthz PASSED
+# test/integration/test_sqs_smoke.py::test_readyz PASSED
+# test/integration/test_sqs_smoke.py::test_create_queue_returns_aws_format_url PASSED
+# ... 12 passed in poucos segundos (make smoke roda só test_sqs_smoke.py;
+# use make test-int para a suíte completa — 72 passed in ~40s)
 
 # Inspecionar logs do shim
 make logs-shim
@@ -373,7 +374,7 @@ Cada pacote em `shim/internal/` é isolado e testável:
 
 ## Compatibilidade AWS — Status atual
 
-Esta seção reflete o que está **implementado e testado E2E** (65/65 testes passando).
+Esta seção reflete o que está **implementado e testado E2E** (72/72 testes passando).
 Tabela detalhada com cobertura por protocolo também está no topo do README.
 Acompanhe o progresso futuro em [`docs/api-compatibility.md`](docs/api-compatibility.md).
 

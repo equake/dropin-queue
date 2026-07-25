@@ -50,10 +50,10 @@ make logs-shim       # tail logs do shim (JSON estruturado)
 ```
 
 Stack:
-- Go 1.25 (em `/home/seiwa/go/bin/go`)
+- Go 1.26 (em `/home/seiwa/go/bin/go`)
 - Python 3.12 + boto3 1.43 + pytest 9 (em `/home/seiwa/venv`)
 - Docker Compose v2
-- NATS JetStream 2.10, MinIO latest
+- NATS JetStream 2.14, MinIO latest, Postgres 16 (backend alternativo)
 
 ---
 

@@ -203,7 +203,7 @@ func (c *Client) Publish(ctx context.Context, topicName string, msg *types.Messa
 
 	subs, lerr := c.ListSubscriptions(ctx, topicName)
 	if lerr != nil {
-		return msg, nil // msg "publicada" (não hã stream de tópico para persistir aqui), fan-out falhou
+		return msg, nil // msg "publicada" (não há stream de tópico para persistir aqui), fan-out falhou
 	}
 
 	// Fan-out com bound de concorrência — mesmo raciocínio do adapter
@@ -248,13 +248,14 @@ const maxFanoutConcurrency = 16
 // síncrono na fila destino. HTTP/HTTPS/outros: não implementado no MVP,
 // mesma limitação documentada no adapter NATS.
 func (c *Client) deliverToSubscription(ctx context.Context, sub *types.Subscription, msg *types.Message) {
-	start := time.Now()
-	defer func() { observability.ObserveStorage("publish_deliver", nil, time.Since(start)) }()
+	var err error
+	defer observability.StartObserve("publish_deliver").Done(&err)
 
 	switch sub.Protocol {
 	case "sqs":
 		queueName := protocol.QueueNameFromURL(sub.Endpoint)
 		if queueName == "" {
+			err = storage.ErrInvalidArgument("SQS subscription com endpoint inválido")
 			observability.L().Warn("SQS subscription com endpoint inválido", "endpoint", sub.Endpoint)
 			return
 		}
@@ -262,7 +263,8 @@ func (c *Client) deliverToSubscription(ctx context.Context, sub *types.Subscript
 			Body:              msg.Body,
 			MessageAttributes: msg.MessageAttributes,
 		}
-		if _, err := c.SendMessage(ctx, queueName, delivery); err != nil {
+		if _, serr := c.SendMessage(ctx, queueName, delivery); serr != nil {
+			err = serr
 			observability.L().Warn("fan-out SQS failed",
 				"sub_arn", sub.ARN, "queue", queueName, "err", err.Error())
 			return

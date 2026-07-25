@@ -4,13 +4,14 @@ Este documento descreve a arquitetura do `dropin-queue`, um clone
 auto-hospedável, compatível com o protocolo AWS SNS/SQS, construído em Go
 sobre NATS JetStream.
 
-> Status: Fase 4 completa — 13 SQS + 9 SNS operações funcionais (65/65 testes E2E passando)
+> Status: Fase 4 completa — 13 SQS + 9 SNS operações funcionais (72/72 testes E2E passando)
 > (CreateQueue/Get/List/Delete + SendMessage/ReceiveMessage/DeleteMessage/
 > ChangeMessageVisibility/PurgeQueue + SetQueueAttributes + SendMessageBatch/
 > DeleteMessageBatch), todas com dual protocol (Query+JSON), todas com
-> testes E2E (45/45 passando) via boto3 oficial Python.
+> testes E2E via boto3 oficial Python.
 > Inclui FIFO queues completas: MessageGroupId, MessageDeduplicationId,
 > ContentBasedDeduplication, SequenceNumber, ordering within group.
+> Backend de mensageria trocável (NATS JetStream ou Postgres) via GQ_BACKEND.
 
 ## Visão geral
 
@@ -28,12 +29,12 @@ sobre NATS JetStream.
 │  ├─────────────────────────────────────────────────────────┤  │
 │  │  protocol/ SQS Query (form+XML) · SQS JSON 1.0         │  │
 │  ├─────────────────────────────────────────────────────────┤  │
-│  │  awssig/    [Semana 4] verificação de AWS Signature v4 │  │
+│  │  awssig/    (Fase 5) verificação de AWS Signature v4   │  │
 │  ├─────────────────────────────────────────────────────────┤  │
-│  │  iam/       [Semana 4] policy evaluation (JSON IAM)    │  │
+│  │  iam/       (Fase 5) policy evaluation (JSON IAM)      │  │
 │  ├─────────────────────────────────────────────────────────┤  │
 │  │  sqs/       validação semântica + tradução erros       │  │
-│  │  sns/       [Semana 4] fan-out · filter policy         │  │
+│  │  sns/       fan-out · filter policy                    │  │
 │  ├─────────────────────────────────────────────────────────┤  │
 │  │  storage/   interface pluggable (broker-agnostic)      │  │
 │  ├─────────────────────────────────────────────────────────┤  │
@@ -141,10 +142,10 @@ FIFO queues (Fase 3):
   (dedup implícito em janela de 2min)
 - SequenceNumber retornado em cada send (MessageId = stream sequence)
 
-### 5. `sns/` — SNS service [Semana 4]
+### 5. `sns/` — SNS service
 
-Stub atual. Implementará fan-out com filter policy em subscribers SQS
-e HTTP/HTTPS.
+Fan-out com filter policy em subscribers SQS (completo). HTTP/HTTPS
+ficam pending — `ConfirmSubscription` é stub (`UnsupportedOperation`).
 
 ### 6. `storage/` — broker abstraction
 
@@ -205,11 +206,25 @@ Mapeamento:
 | MessageGroupId (FIFO)      | Coluna `group_key` — preserva ordem relativa via `ORDER BY id` no claim |
 | MessageDeduplicationId /   | Tabela `message_dedup` (`queue_id`, `dedup_id`) com `UNIQUE` + janela de 5min |
 | ContentBasedDeduplication  | (SHA-256 do body quando não há ID explícito, igual ao adapter NATS)      |
-| Visibility timeout         | Colunas `visible_at` / `locked_until` + `claim_token` (UUID) |
+| Visibility timeout         | Coluna `visible_at` + `claim_token` (UUID)                   |
 | Claim de mensagens         | `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` |
 | Long-polling               | `LISTEN/NOTIFY` (canal único `dropin_queue_msg`, payload = nome da fila) + poll de segurança |
-| Tópico SNS                 | Linha em `topics`                                           |
+| Tópico SNS                 | Linha em `topics` — **sem log de mensagens publicadas** (ver nota abaixo) |
 | Subscription                | Linha em `subscriptions` (`topic_arn` persistido verbatim — storage não conhece account/region) |
+
+**Divergência conhecida: histórico de publish do tópico.** O adapter NATS
+mantém um stream JetStream por tópico (`topic-<nome>`, retenção
+`GQ_TOPIC_MAX_AGE`, default 1h) onde toda mensagem publicada fica
+registrada, independente do fan-out. O adapter Postgres **não tem
+equivalente** — `Publish` só faz fan-out síncrono, nada é persistido a
+mais no tópico em si. Decisão consciente, não lacuna a preencher por
+padrão: hoje **nenhum dos dois backends tem qualquer consumidor desse
+histórico** (o próprio comentário do `Publish` no adapter NATS já registra
+isso como "disponível para... **futuro**"), então implementar o
+equivalente no Postgres seria complexidade sem uso corrente. Fica
+documentado aqui para não ser redescoberto como bug: se um dia alguém
+implementar consumo do histórico de tópico (replay, auditoria, etc.), os
+dois backends precisam ganhar essa capacidade juntos, não só um.
 
 Receipt handle: `pg1:<message_id>:<claim_token>` — stateless, igual ao
 `rh2:` do adapter NATS (ack/nak funciona de qualquer réplica do shim, sem
@@ -221,7 +236,6 @@ query (Standard e FIFO, sem distinção — ver próximo parágrafo):
 ```sql
 WITH claimed AS (
     UPDATE messages SET
-        locked_until = now() + make_interval(secs => $3),
         visible_at   = now() + make_interval(secs => $3),
         delivery_count = delivery_count + 1,
         claim_token = gen_random_uuid()
@@ -287,14 +301,14 @@ throughput mais baixo e HA dependente de failover do Postgres
 - **Logging**: slog JSON em prod, text colorido em dev
 - **Métricas**: Prometheus (shim_http_*, shim_storage_*, shim_sqs_*,
   shim_sns_*)
-- **Tracing**: OTel SDK com stdout exporter em dev (OTLP em prod [Semana 6])
+- **Tracing**: OTel SDK com stdout exporter em dev (OTLP em prod — roadmap)
 
-### 8. `awssig/` — SigV4 [Semana 4]
+### 8. `awssig/` — SigV4 (Fase 5 — planejado)
 
 Verificação de AWS Signature v4. Em modo dev (`AUTH_MODE=off`),
 qualquer credencial é aceita.
 
-### 9. `iam/` — IAM [Semana 4]
+### 9. `iam/` — IAM (Fase 5 — planejado)
 
 Avaliação de policy JSON (subset IAM). Suporta Action, Resource,
 Effect, Condition básico.
@@ -425,7 +439,7 @@ Mapeamentos críticos:
 - [x] Validações: Message vazio, Message > 256 KiB, TopicArn inválido
 - [x] Suporte a MessageAttributes (String/Number/Binary) + Subject
 - [x] Dual protocol: Query (form+XML) e JSON 1.0 simultaneamente
-- [x] 20 testes E2E com boto3 — 65/65 totais passando
+- [x] 20 testes E2E com boto3 — 72/72 totais passando
 
 ### Fase 5 — Auth + IAM real
 
@@ -452,7 +466,8 @@ Mapeamentos críticos:
 ### Conhecidas (aceitas para MVP)
 
 - **Não SigV4 nem IAM** — qualquer credencial aceita (AUTH_MODE=off)
-- **Não suporta SNS** — stub retorna UnsupportedOperation
+- **SNS: subscriptions HTTP/HTTPS ficam pending** — `ConfirmSubscription`
+  é stub (`UnsupportedOperation`); protocol `sqs` está completo
 - **Não tem cluster** — NATS single-node em dev
 - **Não tem observability de produção** — só stdout/log
 - **Não tem TLS** — HTTP plano, TLS termina no LB em prod

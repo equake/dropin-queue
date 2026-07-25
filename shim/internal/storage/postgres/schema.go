@@ -37,14 +37,19 @@ CREATE TABLE IF NOT EXISTS messages (
     enqueued_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     visible_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivery_count       INT NOT NULL DEFAULT 0,
-    claim_token          UUID,
-    locked_until         TIMESTAMPTZ
+    claim_token          UUID
 );
 
 -- Índice principal do claim (ReceiveMessage): mensagens visíveis, em ordem
 -- de chegada, filtradas por fila. SKIP LOCKED faz o resto.
 CREATE INDEX IF NOT EXISTS idx_messages_claim
     ON messages (queue_id, visible_at, id);
+
+-- Índice do reaper de retenção (MessageRetentionPeriod) — ver
+-- Client.reapOnce em client.go. Sem ele, a limpeza periódica faria
+-- sequential scan da tabela inteira a cada tick.
+CREATE INDEX IF NOT EXISTS idx_messages_retention
+    ON messages (queue_id, enqueued_at);
 
 -- message_dedup: dedup FIFO (MessageDeduplicationId explícito ou
 -- ContentBasedDeduplication via SHA-256 do body), janela de 5min — mesmo

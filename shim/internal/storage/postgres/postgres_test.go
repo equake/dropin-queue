@@ -275,8 +275,8 @@ func TestFIFOContentBasedDeduplication(t *testing.T) {
 	if second.Attributes["Duplicate"] != "true" {
 		t.Errorf("esperava Duplicate=true na segunda mensagem idêntica")
 	}
-	if first.ID == second.ID {
-		t.Log("IDs diferentes esperado (segunda é sintética) — ok")
+	if first.ID != second.ID {
+		t.Errorf("duplicata deveria devolver o MessageId da mensagem original (igual PubAck.Duplicate do JetStream): first=%s second=%s", first.ID, second.ID)
 	}
 
 	depth, err := c.QueueDepth(ctx, name)
@@ -285,6 +285,110 @@ func TestFIFOContentBasedDeduplication(t *testing.T) {
 	}
 	if depth != 1 {
 		t.Errorf("dedup deveria resultar em 1 mensagem só na fila, got %d", depth)
+	}
+}
+
+// TestDedupReusableAfterWindowExpires prova o fix do achado da auditoria:
+// sem o upsert condicional em expires_at, um MessageDeduplicationId ficaria
+// bloqueado para sempre após o primeiro uso, mesmo depois da janela de
+// dedup expirar — divergência real da spec SQS FIFO (que permite reuso do
+// ID após a janela). Simula a expiração diretamente no banco em vez de
+// esperar dedupWindow (5min) de verdade.
+func TestDedupReusableAfterWindowExpires(t *testing.T) {
+	c := testClient(t)
+	ctx := context.Background()
+	name := uniqueName(t, "q") + ".fifo"
+	if _, err := c.CreateQueue(ctx, types.Queue{Name: name, FIFO: true, Attributes: types.DefaultQueueAttributes()}); err != nil {
+		t.Fatalf("CreateQueue: %v", err)
+	}
+
+	const dedupID = "reused-id"
+	first, err := c.SendMessage(ctx, name, &types.Message{Body: "body-1", MessageGroupId: "g1", MessageDeduplicationId: dedupID})
+	if err != nil {
+		t.Fatalf("SendMessage 1: %v", err)
+	}
+
+	dup, err := c.SendMessage(ctx, name, &types.Message{Body: "body-1-dup-attempt", MessageGroupId: "g1", MessageDeduplicationId: dedupID})
+	if err != nil {
+		t.Fatalf("SendMessage dup: %v", err)
+	}
+	if dup.ID != first.ID {
+		t.Fatalf("esperava dedup dentro da janela: dup.ID=%s first.ID=%s", dup.ID, first.ID)
+	}
+
+	if _, err := c.pool.Exec(ctx, `
+		UPDATE message_dedup SET expires_at = now() - interval '1 second'
+		WHERE queue_id = (SELECT id FROM queues WHERE name = $1) AND dedup_id = $2
+	`, name, dedupID); err != nil {
+		t.Fatalf("simular expiração: %v", err)
+	}
+
+	reused, err := c.SendMessage(ctx, name, &types.Message{Body: "body-2", MessageGroupId: "g1", MessageDeduplicationId: dedupID})
+	if err != nil {
+		t.Fatalf("SendMessage reused: %v", err)
+	}
+	if reused.Attributes["Duplicate"] == "true" {
+		t.Error("dedup_id expirado não deveria ser tratado como duplicata")
+	}
+	if reused.ID == first.ID {
+		t.Error("mensagem reaproveitando dedup_id expirado deveria ter um MessageId novo")
+	}
+
+	depth, err := c.QueueDepth(ctx, name)
+	if err != nil {
+		t.Fatalf("QueueDepth: %v", err)
+	}
+	if depth != 2 {
+		t.Errorf("esperava 2 mensagens na fila (original + reaproveitada), got %d", depth)
+	}
+}
+
+// TestReaperDeletesExpiredDedupAndRetentionExpiredMessages prova o segundo
+// fix da auditoria: mensagens além de MessageRetentionPeriod e entradas de
+// message_dedup expiradas são removidas pelo reaper. Chama reapOnce()
+// diretamente em vez de esperar reapInterval (1min) de verdade.
+func TestReaperDeletesExpiredDedupAndRetentionExpiredMessages(t *testing.T) {
+	c := testClient(t)
+	ctx := context.Background()
+	name := uniqueName(t, "q")
+	if _, err := c.CreateQueue(ctx, types.Queue{Name: name, Attributes: types.DefaultQueueAttributes()}); err != nil {
+		t.Fatalf("CreateQueue: %v", err)
+	}
+	if _, err := c.SendMessage(ctx, name, &types.Message{Body: "will-expire"}); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	// Simula mensagem mais velha que a retenção default (4 dias) e uma
+	// entrada de dedup expirada, sem esperar de verdade.
+	if _, err := c.pool.Exec(ctx, `
+		UPDATE messages SET enqueued_at = now() - interval '10 days'
+		WHERE queue_id = (SELECT id FROM queues WHERE name = $1)
+	`, name); err != nil {
+		t.Fatalf("simular mensagem antiga: %v", err)
+	}
+	if _, err := c.pool.Exec(ctx, `
+		INSERT INTO message_dedup (queue_id, dedup_id, message_id, expires_at)
+		VALUES ((SELECT id FROM queues WHERE name = $1), 'stale-dedup', 0, now() - interval '1 second')
+	`, name); err != nil {
+		t.Fatalf("simular dedup expirado: %v", err)
+	}
+
+	c.reapOnce(ctx)
+
+	depth, err := c.QueueDepth(ctx, name)
+	if err != nil {
+		t.Fatalf("QueueDepth: %v", err)
+	}
+	if depth != 0 {
+		t.Errorf("reaper deveria ter removido a mensagem além da retenção, got depth=%d", depth)
+	}
+
+	var dedupCount int
+	if err := c.pool.QueryRow(ctx, `SELECT count(*) FROM message_dedup WHERE dedup_id = 'stale-dedup'`).Scan(&dedupCount); err != nil {
+		t.Fatalf("count dedup: %v", err)
+	}
+	if dedupCount != 0 {
+		t.Errorf("reaper deveria ter removido a entrada de dedup expirada, got %d", dedupCount)
 	}
 }
 

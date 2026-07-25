@@ -8,7 +8,7 @@
 //	Fila SQS Standard  →  linhas na tabela messages, claim sem restrição de grupo
 //	Fila SQS FIFO      →  messages.group_key preserva ordem relativa (ORDER BY id)
 //	Tópico SNS         →  linha na tabela topics; fan-out síncrono no Publish
-//	Visibility timeout →  colunas locked_until/visible_at (equivalente ao AckWait)
+//	Visibility timeout →  coluna visible_at (equivalente ao AckWait)
 //	Long-polling        →  LISTEN/NOTIFY (canal fixo) + poll de segurança
 //
 // Trocável via config.Backend (GQ_BACKEND=postgres) — nunca simultâneo
@@ -74,9 +74,9 @@ type queueIdent struct {
 type Client struct {
 	pool *pgxpool.Pool
 
-	listenConn   *pgx.Conn
-	listenDone   chan struct{}
-	cancelListen context.CancelFunc
+	listenConn *pgx.Conn
+	cancelBg   context.CancelFunc
+	bgWG       sync.WaitGroup
 
 	hub       *notifyHub
 	coalescer *notifyCoalescer
@@ -142,12 +142,11 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 
-	listenCtx, cancel := context.WithCancel(context.Background())
+	bgCtx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		pool:         pool,
 		listenConn:   listenConn,
-		listenDone:   make(chan struct{}),
-		cancelListen: cancel,
+		cancelBg:     cancel,
 		hub:          newNotifyHub(),
 		pollInterval: pollInterval,
 		queueCache:   make(map[string]queueIdent),
@@ -161,7 +160,9 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		}
 	})
 
-	go c.listenLoop(listenCtx)
+	c.bgWG.Add(2)
+	go func() { defer c.bgWG.Done(); c.listenLoop(bgCtx) }()
+	go func() { defer c.bgWG.Done(); c.reapLoop(bgCtx) }()
 
 	observability.L().Info("conectado ao Postgres", "max_conns", maxConns)
 	return c, nil
@@ -171,7 +172,6 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 // memória, que acorda os ReceiveMessage em long-poll esperando por
 // aquela fila. Reconecta automaticamente se a conexão cair.
 func (c *Client) listenLoop(ctx context.Context) {
-	defer close(c.listenDone)
 	for {
 		notif, err := c.listenConn.WaitForNotification(ctx)
 		if err != nil {
@@ -190,6 +190,53 @@ func (c *Client) listenLoop(ctx context.Context) {
 	}
 }
 
+// reapInterval é o intervalo do reaper de limpeza (dedup expirado +
+// mensagens além da retenção). Não é exposto via config: é GC puramente
+// operacional, não afeta corretude — o upsert condicional em
+// message_dedup (ver messages.go:SendMessage) já garante que um dedup_id
+// expirado pode ser reaproveitado na hora, mesmo que o reaper não tenha
+// rodado ainda. O reaper só existe para não deixar as tabelas crescerem
+// sem limite.
+const reapInterval = time.Minute
+
+// reapLoop roda a limpeza periódica em background. Cada réplica do shim
+// roda seu próprio reaper — sem eleição de líder por simplicidade; DELETE
+// concorrente de múltiplas réplicas é seguro (só redundante ocasionalmente).
+func (c *Client) reapLoop(ctx context.Context) {
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.reapOnce(context.Background())
+		}
+	}
+}
+
+// reapOnce remove entradas de dedup expiradas e mensagens além da
+// MessageRetentionPeriod da fila — equivalente ao MaxAge nativo do
+// JetStream no adapter NATS, que aqui precisa ser explícito.
+func (c *Client) reapOnce(ctx context.Context) {
+	if tag, err := c.pool.Exec(ctx, `DELETE FROM message_dedup WHERE expires_at < now()`); err != nil {
+		observability.L().Warn("reaper: limpeza de message_dedup falhou", "err", err.Error())
+	} else if n := tag.RowsAffected(); n > 0 {
+		observability.L().Debug("reaper: dedup expirado removido", "rows", n)
+	}
+
+	if tag, err := c.pool.Exec(ctx, `
+		DELETE FROM messages m
+		USING queues q
+		WHERE m.queue_id = q.id
+		  AND m.enqueued_at < now() - make_interval(secs => q.message_retention_period)
+	`); err != nil {
+		observability.L().Warn("reaper: limpeza de mensagens expiradas por retenção falhou", "err", err.Error())
+	} else if n := tag.RowsAffected(); n > 0 {
+		observability.L().Info("reaper: mensagens expiradas por retenção removidas", "rows", n)
+	}
+}
+
 // Ping verifica que o pool está acessível. Custo O(1) — usado pelo
 // readiness probe.
 func (c *Client) Ping(ctx context.Context) error {
@@ -199,10 +246,10 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close encerra o listener e o pool de conexões.
+// Close encerra o listener, o reaper e o pool de conexões.
 func (c *Client) Close() error {
-	c.cancelListen()
-	<-c.listenDone
+	c.cancelBg()
+	c.bgWG.Wait()
 	err := c.listenConn.Close(context.Background())
 	c.pool.Close()
 	observability.L().Info("conexão Postgres fechada")

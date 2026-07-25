@@ -112,10 +112,20 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 	}
 
 	if dedupID != "" {
+		// DO UPDATE ... WHERE expires_at <= now() em vez de DO NOTHING: se
+		// a entrada existente já expirou, ela é "reaproveitada" na hora
+		// para o dedup_id atual — sem isso, um MessageDeduplicationId
+		// ficaria bloqueado para SEMPRE após o primeiro uso (o reaper só
+		// reclama disco periodicamente, não é o que garante a corretude
+		// aqui). RowsAffected()==0 continua significando "duplicata
+		// genuína dentro da janela" (conflito com WHERE falso não gera
+		// linha nem update).
 		tag, dErr := tx.Exec(ctx, `
 			INSERT INTO message_dedup (queue_id, dedup_id, message_id, expires_at)
 			VALUES ($1, $2, $3, now() + make_interval(secs => $4))
-			ON CONFLICT (queue_id, dedup_id) DO NOTHING
+			ON CONFLICT (queue_id, dedup_id) DO UPDATE
+				SET message_id = EXCLUDED.message_id, expires_at = EXCLUDED.expires_at
+				WHERE message_dedup.expires_at <= now()
 		`, qid.id, dedupID, id, int(dedupWindow.Seconds()))
 		if dErr != nil {
 			return nil, fmt.Errorf("dedup insert: %w", dErr)
@@ -179,12 +189,13 @@ func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.M
 //
 //	WaitTimeSeconds     → loop de claim + espera por NOTIFY (com poll de
 //	                      segurança) até esgotar o prazo
-//	VisibilityTimeout   → locked_until/visible_at (equivalente ao AckWait)
+//	VisibilityTimeout   → visible_at (equivalente ao AckWait)
 //	MaxNumberOfMessages → batch size do claim
 //
-// Filas Standard usam SKIP LOCKED direto (claimStandard); filas FIFO
-// passam pelo mutex de grupo em queue_groups (claimFIFO) para preservar
-// ordering-within-group como o SQS FIFO real.
+// claim() é único para Standard e FIFO — sem distinção de path. Ordem
+// relativa dentro de um MessageGroupId (FIFO) sai de graça do ORDER BY id
+// do claim, sem impor exclusividade de entrega por grupo (ver claim() e
+// docs/architecture.md#backend-postgres para o porquê).
 func (c *Client) ReceiveMessage(
 	ctx context.Context,
 	queueName string,
@@ -280,7 +291,6 @@ func (c *Client) claim(ctx context.Context, q queueIdent, maxMessages, visibilit
 	rows, err := c.pool.Query(ctx, `
 		WITH claimed AS (
 			UPDATE messages SET
-				locked_until = now() + make_interval(secs => $3),
 				visible_at = now() + make_interval(secs => $3),
 				delivery_count = delivery_count + 1,
 				claim_token = gen_random_uuid()
@@ -396,9 +406,7 @@ func (c *Client) ChangeMessageVisibility(
 	}
 
 	_, qerr := c.pool.Exec(ctx, `
-		UPDATE messages SET
-			visible_at = now() + make_interval(secs => $4),
-			locked_until = now() + make_interval(secs => $4)
+		UPDATE messages SET visible_at = now() + make_interval(secs => $4)
 		WHERE id = $1 AND claim_token = $2::uuid AND queue_id = $3
 	`, id, token, q.id, visibilityTimeout)
 	if qerr != nil {

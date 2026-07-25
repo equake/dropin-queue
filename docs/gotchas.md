@@ -135,6 +135,45 @@
     (`shim-postgres`, porta 4567). Só apareceu ao rodar a MESMA suíte
     contra os dois backends lado a lado.
 
+23. **`ON CONFLICT ... DO NOTHING` em tabela de dedup bloqueia o ID PARA
+    SEMPRE, não só durante a janela.** `message_dedup` tem
+    `PRIMARY KEY (queue_id, dedup_id)`; um `DO NOTHING` simples nunca deixa
+    o mesmo `dedup_id` ser reescrito, mesmo depois de `expires_at` passar —
+    diferente da spec SQS FIFO, que permite reuso do
+    `MessageDeduplicationId` após a janela de 5min. Fix: `ON CONFLICT ...
+    DO UPDATE SET ... WHERE message_dedup.expires_at <= now()` — upsert
+    condicional que "reaproveita" a linha expirada na hora, sem depender
+    do reaper (`reapOnce` em `client.go`) já ter rodado. O reaper existe só
+    para reclamar disco, não para garantir corretude.
+
+24. **`MessageRetentionPeriod` não é enforced automaticamente em nenhuma
+    tabela.** Diferente do NATS (que usa `MaxAge` nativo do stream), o
+    adapter Postgres precisa de um reaper explícito (`reapOnce` em
+    `client.go`, chamado a cada `reapInterval` por `reapLoop`) fazendo
+    `DELETE FROM messages WHERE enqueued_at < now() - retention`. Sem ele,
+    mensagens nunca-recebidas ficam na fila indefinidamente — divergência
+    real da spec, não só custo de disco.
+
+25. **Métrica de storage (`ObserveStorage`) chamada explicitamente com
+    `nil` hardcoded é uma call-site fácil de esquecer ao copiar padrão
+    entre adapters.** `deliverToSubscription` em AMBOS os backends
+    (`storage/nats/topics.go` e `storage/postgres/topics.go`) tinha
+    `ObserveStorage("publish_deliver", nil, ...)` — falhas de fan-out SNS
+    nunca apareciam nas métricas, só em log `Warn` que ninguém monitora
+    ativamente. Viola a convenção do §6 do AGENTS.md (usar sempre
+    `StartObserve(op).Done(&err)` com named return / var local
+    endereçável, nunca `ObserveStorage` explícito). O `Publish` em si
+    continua retornando sucesso mesmo com falhas de fan-out — isso é
+    intencional (replica a semântica real do SNS: `Publish` só garante que
+    a AWS aceitou a mensagem, entrega a subscribers é assíncrona/
+    desacoplada) — o bug era só a métrica ficar sempre "ok".
+
+26. **Divergência documentada, não corrigida:** o adapter Postgres não
+    mantém um log histórico de mensagens publicadas em tópicos SNS (o NATS
+    mantém via stream `topic-<nome>`, retenção `GQ_TOPIC_MAX_AGE`). Ver
+    `docs/architecture.md#backend-postgres`. Decisão consciente: hoje nada
+    consome esse histórico em nenhum dos dois backends.
+
 ## Convenções de código
 
 17. **Commits em português, mensagens detalhadas** descrevendo o porquê da mudança.
