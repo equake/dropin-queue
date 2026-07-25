@@ -5,47 +5,25 @@ Cobre as operações básicas de tópicos, subscriptions e publish,
 incluindo fan-out e filter policy.
 
 Assume:
-    - shim rodando em http://localhost:4566 (AUTH_MODE=off)
+    - shim rodando em SHIM_ENDPOINT (default http://localhost:4566, AUTH_MODE=off)
     - boto3 com credenciais dummy aceitas em dev
+
+sqs_client/sns_client vêm de conftest.py — não redefinir localmente aqui.
+Uma versão anterior deste arquivo tinha fixtures locais com endpoint_url
+hardcoded em "http://localhost:4566", que sombreavam (shadow) as fixtures
+de conftest.py e ignoravam SHIM_ENDPOINT — os testes deste arquivo sempre
+rodavam contra a porta 4566 mesmo quando SHIM_ENDPOINT apontava para outro
+backend (ex: make test-int-postgres, porta 4567). Descoberto ao rodar a
+mesma suíte contra o backend Postgres pela primeira vez.
 """
 
 import json
 import time
 import uuid
 
-import boto3
 import pytest
 
-
-SHIM_ENDPOINT = "http://localhost:4566"
-SHIM_REGION = "us-east-1"
-DEV_ACCESS_KEY = "AKIADEV0000000000000"
-DEV_SECRET_KEY = "dev-secret-key-not-validated"
-
-
-# --- Fixtures locais ---
-
-
-@pytest.fixture
-def sns_client():
-    return boto3.client(
-        "sns",
-        endpoint_url=SHIM_ENDPOINT,
-        region_name=SHIM_REGION,
-        aws_access_key_id=DEV_ACCESS_KEY,
-        aws_secret_access_key=DEV_SECRET_KEY,
-    )
-
-
-@pytest.fixture
-def sqs_client():
-    return boto3.client(
-        "sqs",
-        endpoint_url=SHIM_ENDPOINT,
-        region_name=SHIM_REGION,
-        aws_access_key_id=DEV_ACCESS_KEY,
-        aws_secret_access_key=DEV_SECRET_KEY,
-    )
+from conftest import SHIM_ENDPOINT
 
 
 @pytest.fixture

@@ -1,13 +1,23 @@
 # docker-compose.yml — stack dev local
 #
-# Sobe o ambiente mínimo para testar o dropin-queue:
+# Backend NATS (default, sem profile):
 #   - nats:    NATS JetStream em modo single-node (sem cluster para dev)
 #   - minio:   Object storage S3-compatible para JetStream file storage (futuro)
 #   - shim:    Build do dropin-server localmente, conectado ao nats
 #
+# Backend Postgres (profile "postgres" — GQ_BACKEND=postgres):
+#   - postgres:      Postgres 16 (LISTEN/NOTIFY + SKIP LOCKED)
+#   - shim-postgres:  Mesmo build do dropin-server, conectado ao postgres
+#
+# Os dois backends nunca sobem juntos por acidente — cada um só é criado
+# quando referenciado (profile default vs "postgres"). Não compartilham
+# porta (shim-postgres usa 4567) para permitir rodar os dois lado a lado
+# ao comparar comportamento.
+#
 # Uso:
-#   docker compose up -d       # sobe tudo
-#   make smoke                 # roda smoke test (boto3 cria fila)
+#   docker compose up -d                        # backend NATS (default)
+#   docker compose --profile postgres up -d     # backend Postgres
+#   make smoke                                  # roda smoke test (boto3 cria fila)
 #   docker compose logs -f shim
 #   docker compose down        # derruba
 #   docker compose down -v     # remove volumes também
@@ -90,6 +100,54 @@ services:
     # Para healthcheck em produção, configure via orchestrator (k8s/docker)
     # apontando para /healthz e /readyz.
 
+  # --- Postgres (backend alternativo, profile "postgres") ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: dq-postgres
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: dropin
+      POSTGRES_PASSWORD: dropin
+      POSTGRES_DB: dropin
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dropin -d dropin"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - dq-net
+
+  # --- dropin-server (AWS API) rodando contra o backend Postgres ---
+  shim-postgres:
+    build:
+      context: .
+      dockerfile: shim/Dockerfile
+      args:
+        VERSION: dev-local
+    container_name: dq-shim-postgres
+    profiles: ["postgres"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GQ_ADDR: ":4567"
+      GQ_BACKEND: "postgres"
+      GQ_POSTGRES_DSN: "postgres://dropin:dropin@postgres:5432/dropin?sslmode=disable"
+      GQ_ACCOUNT_ID: "000000000000"
+      GQ_REGION: "us-east-1"
+      GQ_AUTH_MODE: "off"           # dev only — produção usa strict
+      GQ_LOG_LEVEL: "info"
+      GQ_SHUTDOWN_TIMEOUT: "10s"
+    ports:
+      - "4567:4567"
+    networks:
+      - dq-net
+
 networks:
   dq-net:
     driver: bridge
@@ -98,4 +156,6 @@ volumes:
   nats-data:
     driver: local
   minio-data:
+    driver: local
+  postgres-data:
     driver: local

@@ -64,8 +64,14 @@ Stack:
 - `docs/gotchas.md` — **LEIA ANTES DE IMPLEMENTAR** — bugs que já nos custaram tempo
 - `shim/internal/protocol/` — parsers/serializers AWS (referência para dual protocol)
 - `shim/internal/storage/nats/` — adapter NATS JetStream (referência para KV + streams)
+- `shim/internal/storage/postgres/` — adapter Postgres (LISTEN/NOTIFY + SKIP LOCKED),
+  trocável via `GQ_BACKEND`; ver `docs/architecture.md#backend-postgres`
 - `shim/internal/awserr/` — type AWSError compartilhado entre SQS e SNS; sender-fault registry
-- `shim/test/integration/` — testes E2E boto3 (referência para uso correto da API)
+- `shim/test/integration/` — testes E2E boto3 (referência para uso correto da API).
+  Rodam contra os dois backends sem mudança (`make test-int` / `make test-int-postgres`) —
+  **nunca hardcode `http://localhost:4566` em teste novo**, use a fixture
+  `sqs_client`/`sns_client` de `conftest.py` ou importe `SHIM_ENDPOINT` de lá
+  (ver gotcha #22 em `docs/gotchas.md`)
 
 ---
 

@@ -159,6 +159,13 @@ type Storage interface {
 }
 ```
 
+Nenhum tipo do broker vaza por essa interface — `sqs/`, `sns/`, `protocol/`
+e `server/` só conhecem `storage.Storage` e `pkg/types`. Isso é o que torna
+o backend trocável via `config.Backend` (`GQ_BACKEND=nats|postgres`, nunca
+os dois ao mesmo tempo): trocar de adapter é uma mudança contida em
+`cmd/dropin-server/main.go` (qual `Connect()` chamar) — zero mudança nas
+camadas acima.
+
 #### Adapter NATS JetStream (`storage/nats/`)
 
 Mapeamento:
@@ -181,6 +188,99 @@ Por que KV separado para atributos:
 - Mudanças em VisibilityTimeout não exigem recriar o stream
 - Streams JetStream são para mensagens; metadata é orthogonal
 - Permite evoluir schema sem migração de streams
+
+#### Adapter Postgres (`storage/postgres/`) {#backend-postgres}
+
+Opção de backend para quem já opera Postgres em produção e quer evitar
+rodar um segundo sistema de mensageria. Habilitado via `GQ_BACKEND=postgres`
++ `GQ_POSTGRES_DSN`. Schema aplicado idempotente (`CREATE TABLE IF NOT
+EXISTS`) no `Connect()` — sem ferramenta de migration externa no MVP.
+
+Mapeamento:
+
+| Conceito AWS              | Implementação Postgres                                    |
+|----------------------------|------------------------------------------------------------|
+| Fila SQS                  | Linha em `queues`                                          |
+| Mensagem                  | Linha em `messages` (`queue_id`, `group_key`, `body`, `message_attributes` JSONB) |
+| MessageGroupId (FIFO)      | Coluna `group_key` — preserva ordem relativa via `ORDER BY id` no claim |
+| MessageDeduplicationId /   | Tabela `message_dedup` (`queue_id`, `dedup_id`) com `UNIQUE` + janela de 5min |
+| ContentBasedDeduplication  | (SHA-256 do body quando não há ID explícito, igual ao adapter NATS)      |
+| Visibility timeout         | Colunas `visible_at` / `locked_until` + `claim_token` (UUID) |
+| Claim de mensagens         | `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` |
+| Long-polling               | `LISTEN/NOTIFY` (canal único `dropin_queue_msg`, payload = nome da fila) + poll de segurança |
+| Tópico SNS                 | Linha em `topics`                                           |
+| Subscription                | Linha em `subscriptions` (`topic_arn` persistido verbatim — storage não conhece account/region) |
+
+Receipt handle: `pg1:<message_id>:<claim_token>` — stateless, igual ao
+`rh2:` do adapter NATS (ack/nak funciona de qualquer réplica do shim, sem
+sticky session).
+
+**Claim de mensagens (`SKIP LOCKED`).** `ReceiveMessage` usa uma única
+query (Standard e FIFO, sem distinção — ver próximo parágrafo):
+
+```sql
+WITH claimed AS (
+    UPDATE messages SET
+        locked_until = now() + make_interval(secs => $3),
+        visible_at   = now() + make_interval(secs => $3),
+        delivery_count = delivery_count + 1,
+        claim_token = gen_random_uuid()
+    WHERE id IN (
+        SELECT id FROM messages
+        WHERE queue_id = $1 AND visible_at <= now()
+        ORDER BY id
+        FOR UPDATE SKIP LOCKED
+        LIMIT $2
+    )
+    RETURNING id, body, message_attributes, enqueued_at, delivery_count, claim_token::text
+)
+SELECT * FROM claimed ORDER BY id;
+```
+
+O `ORDER BY id` externo (sobre a CTE, não sobre a subquery) é essencial:
+`UPDATE ... RETURNING` não herda a ordem da subquery de seleção — o
+resultado pode sair em ordem física do heap, que o MVCC embaralha a cada
+UPDATE. Sem o `ORDER BY` externo, ordering-within-group do FIFO quebra de
+forma intermitente sob concorrência (bug real, encontrado nos testes E2E
+durante o desenvolvimento — ver `docs/gotchas.md`).
+
+**FIFO não usa mutex de grupo.** Uma iteração inicial do design chegou a
+usar uma tabela `queue_groups` com `FOR UPDATE SKIP LOCKED` para impor "no
+máximo 1 mensagem in-flight por `MessageGroupId`" (o comportamento real do
+SQS FIFO). Essa restrição foi removida porque quebrava paridade com o
+adapter NATS: o adapter NATS **também não impõe** esse limite hoje (o
+consumer durável compartilhado distribui livremente entre pulls
+concorrentes) — só garante ordem relativa via log order. Manter o mutex no
+Postgres teria deixado os dois backends com semânticas de FIFO
+diferentes, quebrando o requisito de "mesma suíte E2E passa nos dois".
+Ordering-within-group nos dois backends hoje = ordem relativa preservada,
+**não** exclusividade de entrega. Fica documentado aqui como um item de
+paridade a revisitar junto (nos dois backends) se o projeto precisar da
+garantia real do SQS FIFO no futuro.
+
+**Long-polling: NOTIFY com poll de segurança, não 1 conexão por request.**
+Uma única conexão dedicada de `LISTEN` por réplica do shim recebe
+notificações no canal fixo `dropin_queue_msg` (payload = nome da fila) e
+multiplexa para os `ReceiveMessage` em espera via canais Go em memória.
+`SendMessage` não dispara `NOTIFY` síncrono por mensagem — um debounce
+leading-edge (`GQ_POSTGRES_NOTIFY_COALESCE`, default 20ms) evita o teto de
+throughput que um `NOTIFY` por `INSERT` causaria (o artigo que motivou este
+design, [dbos.dev](https://www.dbos.dev/blog/postgres-listen-notify-scalability),
+mediu 2.9K writes/s com notificação por linha vs. 60K writes/s
+bufferizando). Um poll de segurança (`GQ_POSTGRES_POLL_INTERVAL`, default
+300ms) cobre o caso raro de notificação perdida (reconexão do listener,
+etc.) — o mesmo padrão de rede de segurança que o artigo descreve.
+
+**Trade-off de escala (avaliar antes de produção).** Postgres LISTEN/NOTIFY
++ `SKIP LOCKED` é uma opção legítima de baixo custo para volume
+moderado/alto, mas a história de escala horizontal é estruturalmente
+diferente da do cluster NATS JetStream (Raft, múltiplos nós ativos): em
+Postgres, escrita é sempre single-writer (primary). O backend Postgres
+provavelmente serve bem até um teto de throughput de escrita bem definido
+por instância, mas não escala escrita horizontalmente como o cluster NATS
+— é uma troca de "menor custo/operação mais simples" por "teto de
+throughput mais baixo e HA dependente de failover do Postgres
+(Patroni/RDS Multi-AZ/etc.), não de Raft nativo".
 
 ### 7. `observability/` — telemetria
 

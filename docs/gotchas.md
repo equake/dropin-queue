@@ -91,6 +91,50 @@
     JetStream distribui as mensagens. Receipt handles são stateless (reply
     subject), então o delete pode chegar em qualquer réplica.
 
+## Postgres backend (storage/postgres)
+
+18. **`UPDATE ... RETURNING` NÃO herda o `ORDER BY` da subquery usada no
+    `WHERE id IN (SELECT ... ORDER BY id FOR UPDATE SKIP LOCKED LIMIT N)`.**
+    O resultado do `RETURNING` pode sair em ordem física do heap (MVCC
+    reordena fisicamente as tuplas a cada UPDATE), não na ordem de chegada.
+    Sintoma: ordering-within-group do FIFO quebra de forma intermitente sob
+    concorrência — só apareceu rodando a suíte E2E inteira, nunca em teste
+    isolado. Fix: envolver em CTE e aplicar `ORDER BY id` numa `SELECT`
+    externa (`WITH claimed AS (UPDATE ... RETURNING ...) SELECT * FROM
+    claimed ORDER BY id`). Ver `messages.go:claim`.
+
+19. **`gen_random_uuid()` é nativo desde o Postgres 13** — não precisa da
+    extensão `pgcrypto`. Evita `CREATE EXTENSION` no schema (requisito a
+    menos em Postgres gerenciado com extensões restritas).
+
+20. **Dedup (`MessageDeduplicationId`/`ContentBasedDeduplication`) precisa
+    devolver o `MessageId` da mensagem ORIGINAL em duplicatas, não um ID
+    sintético.** Mesmo comportamento do JetStream: `PubAck.Duplicate=true`
+    reaproveita o `Sequence` original em vez de gerar um novo — clientes
+    que enviam a mesma mensagem 3x esperam o MESMO `MessageId` nas 3
+    respostas. Implementação: insere a mensagem sempre, e se
+    `message_dedup` já tinha esse `(queue_id, dedup_id)`, desfaz o insert
+    (`DELETE`) e devolve o `message_id` gravado na primeira vez.
+
+21. **FIFO (`storage/postgres`) não restringe a "1 mensagem in-flight por
+    grupo".** Só preserva ordem relativa (via `ORDER BY id`), igual ao
+    adapter NATS. Uma versão anterior do design impunha essa restrição via
+    mutex de grupo (`FOR UPDATE SKIP LOCKED` numa tabela `queue_groups`) —
+    foi removida por quebrar paridade de comportamento com o NATS (que
+    também não impõe o limite) e por quebrar o teste E2E
+    `test_fifo_ordering_within_message_group`, que espera receber TODAS as
+    mensagens do grupo numa única chamada, não uma por vez.
+
+22. **Teste E2E que usa `subprocess`/`curl` direto (em vez do client boto3
+    da fixture) precisa importar `SHIM_ENDPOINT` de `conftest.py`, não
+    hardcodear `http://localhost:4566`.** `test_sns_large_publish.py` e uma
+    versão anterior de `test_sns.py` (fixtures locais duplicadas com
+    `endpoint_url` fixo) tinham esse hardcode — invisível enquanto só
+    existia 1 backend/porta, mas silenciosamente testava o backend ERRADO
+    assim que um segundo backend passou a rodar numa porta diferente
+    (`shim-postgres`, porta 4567). Só apareceu ao rodar a MESMA suíte
+    contra os dois backends lado a lado.
+
 ## Convenções de código
 
 17. **Commits em português, mensagens detalhadas** descrevendo o porquê da mudança.
