@@ -174,6 +174,21 @@
     `docs/architecture.md#backend-postgres`. Decisão consciente: hoje nada
     consome esse histórico em nenhum dos dois backends.
 
+27. **`jetstream.StreamConfig.Duplicates` não setado usa o default do
+    nats-server (2min), não o valor da spec SQS FIFO (5min).** O adapter
+    NATS deduplicava mensagens FIFO numa janela mais curta que o SQS real
+    e que o adapter Postgres (`dedupWindow = 5*time.Minute` desde sempre)
+    — uma msg reenviada entre 2min e 5min do original não era deduplicada
+    no NATS mas seria no Postgres/SQS real. Fix: `cfg.Duplicates =
+    dedupWindow` em `streamCfg()` (mesmo nome de const nos dois adapters).
+    **Cuidado ao mexer nisso de novo**: `Duplicates` não pode exceder
+    `MaxAge` — o nats-server rejeita `CreateStream` nesse caso. Como
+    `MessageRetentionPeriod` aceita valores a partir de 60s (spec SQS),
+    uma fila de retenção curta com `Duplicates` fixo em 5min quebraria
+    `CreateQueue`. O fix capa: `if cfg.Duplicates > cfg.MaxAge { cfg.
+    Duplicates = cfg.MaxAge }`. Verificado contra nats-server real (não só
+    unitário) antes de considerar resolvido.
+
 ## Convenções de código
 
 17. **Commits em português, mensagens detalhadas** descrevendo o porquê da mudança.

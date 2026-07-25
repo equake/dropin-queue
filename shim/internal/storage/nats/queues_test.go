@@ -78,6 +78,35 @@ func TestStreamCfg_Defaults(t *testing.T) {
 	if cfg.MaxMsgs != defaultMaxMsgsPerQueue {
 		t.Errorf("MaxMsgs default: got %d", cfg.MaxMsgs)
 	}
+	// Duplicates precisa ser setado explicitamente — sem isso o
+	// nats-server usa seu próprio default de 2min, divergindo da spec
+	// SQS FIFO (5min) e do adapter Postgres (dedupWindow = 5min).
+	if cfg.Duplicates != dedupWindow {
+		t.Errorf("Duplicates: got %v, want %v (dedupWindow)", cfg.Duplicates, dedupWindow)
+	}
+}
+
+// TestStreamCfg_DuplicatesCappedByShortRetention prova o cuidado extra do
+// fix: o nats-server rejeita CreateStream se Duplicates > MaxAge. Uma fila
+// com MessageRetentionPeriod curto (SQS aceita a partir de 60s, bem abaixo
+// dos 5min de dedupWindow) precisa ter Duplicates capado ao MaxAge, não
+// travado num valor fixo que excede a retenção da fila.
+func TestStreamCfg_DuplicatesCappedByShortRetention(t *testing.T) {
+	c := &Client{replicas: 1}
+	q := types.Queue{
+		Name: "short-retention",
+		Attributes: types.QueueAttributes{
+			MessageRetentionPeriod: 60, // mínimo aceito pela spec SQS
+		},
+	}
+	cfg := c.streamCfg(q)
+	want := 60 * time.Second
+	if cfg.Duplicates != want {
+		t.Errorf("Duplicates deveria ser capado por MaxAge: got %v, want %v", cfg.Duplicates, want)
+	}
+	if cfg.Duplicates > cfg.MaxAge {
+		t.Errorf("Duplicates (%v) nunca pode exceder MaxAge (%v) — nats-server rejeita CreateStream", cfg.Duplicates, cfg.MaxAge)
+	}
 }
 
 func TestStreamCfg_CustomRetention(t *testing.T) {

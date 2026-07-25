@@ -210,6 +210,12 @@ func (c *Client) reapLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// context.Background() de propósito, não ctx: um reap em voo
+			// no momento do shutdown (Close → cancelBg) termina os 2
+			// DELETEs rápidos em vez de ser abortado no meio — mais
+			// seguro que interromper uma limpeza pela metade, e o custo
+			// é irrelevante (bgWG.Wait() em Close já espera essa
+			// goroutine terminar de qualquer forma).
 			c.reapOnce(context.Background())
 		}
 	}

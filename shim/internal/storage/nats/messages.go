@@ -110,7 +110,10 @@ func messageHeaders(attrs map[string]types.MessageAttribute) (nats.Header, error
 //  4. js.PublishAsync (não-bloqueante) → espera ack síncrono.
 //  5. Calcula MD5 do body → retorna.
 //
-// Idempotência FIFO: Nats-Msg-Id deduplica em janela de 2 minutos (default).
+// Idempotência FIFO: Nats-Msg-Id deduplica em janela de 5 minutos
+// (dedupWindow em queues.go, setado explicitamente via cfg.Duplicates —
+// sem isso o default do JetStream seria 2min, divergindo da spec SQS FIFO
+// e do adapter Postgres, que já usa 5min).
 // Para idempotência Standard, o cliente controla com MessageDeduplicationId.
 func (c *Client) SendMessage(ctx context.Context, queueName string, msg *types.Message) (result *types.Message, err error) {
 	defer observability.StartObserve("send_message").Done(&err)

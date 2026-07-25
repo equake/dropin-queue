@@ -137,9 +137,9 @@ FIFO queues (Fase 3):
 
 - MessageGroupId particiona subject NATS (`q.<queue>.<groupId>`) →
   ordering within group preservado nativamente
-- MessageDeduplicationId via Nats-Msg-Id (dedup explícito em janela de 2min)
+- MessageDeduplicationId via Nats-Msg-Id (dedup explícito em janela de 5min)
 - ContentBasedDeduplication via SHA-256(body) como Nats-Msg-Id
-  (dedup implícito em janela de 2min)
+  (dedup implícito em janela de 5min)
 - SequenceNumber retornado em cada send (MessageId = stream sequence)
 
 ### 5. `sns/` — SNS service
